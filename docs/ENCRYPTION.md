@@ -84,11 +84,16 @@ in `src/Orbit.Host/Security.cs`). Neither side relies on the other being
 configured correctly.
 
 **Why TLS 1.2 is still allowed.** Both ends are Orbit, so TLS 1.3-only would be
-simpler. But .NET's TLS on macOS may not serve TLS 1.3. Requiring it would
-break Mac hosts before they can be validated. The TLS 1.2 suites that remain
+simpler. But a Mac host cannot serve TLS 1.3 today: .NET 10 adds TLS 1.3 on
+macOS (through Network.framework, opt-in via `System.Net.Security.UseNetworkFramework`)
+for **clients only**, and server-side `SslStream`, which Orbit's host uses, is
+unaffected ([.NET 10 libraries notes](https://learn.microsoft.com/en-us/dotnet/core/whats-new/dotnet-10/libraries#tls-13-for-macos-client)).
+So **a Mac host serves TLS 1.2 with ECDHE and AES-256-GCM**, and a TLS 1.3-only
+client is refused. Requiring TLS 1.3 would make Mac computers unreachable.
+The TLS 1.2 suites that remain
 have the same core guarantees: ephemeral key exchange and authenticated
 encryption. TLS 1.3's downgrade protection prevents an attacker from forcing
-TLS 1.2 when both sides support 1.3.
+TLS 1.2 when both sides support 1.3, so a Windows host is always reached over TLS 1.3.
 
 ## Measured results
 
@@ -102,6 +107,14 @@ Electron 45 (BoringSSL).
 | TLS 1.2 only, Orbit suites | ECDHE-RSA-AES256-GCM · P-384 | Served |
 | TLS 1.2, CBC only | **Served** (ECDHE-RSA-AES256-SHA) | **Refused** |
 | TLS 1.2, static RSA only | **Served** (AES256-GCM-SHA384, no forward secrecy) | **Refused** |
+
+**Real cross-device test (2026-10-26):** an Apple-silicon Mac and a Windows 11 PC
+running Orbit 0.1.0-preview.4 over Tailscale (relayed path). View-only, security codes compared on both sides:
+
+| Viewer → host | Negotiated link |
+|---|---|
+| Mac → Windows host | TLS 1.3 · AES-256-GCM · X25519 |
+| Windows → Mac host | TLS 1.2 · ECDHE · AES-256-GCM (forward secret), as explained above |
 
 Automated coverage: `npm test` (transport tests for weak servers, link
 description, and that no pairing secret reaches a weak server), the host

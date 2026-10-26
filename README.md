@@ -11,7 +11,7 @@
     <a href="https://github.com/Optimizer077/orbit-remote/releases/tag/v0.1.0-preview.4"><img src="https://img.shields.io/badge/download-Windows_x64-b2e6c5?style=flat-square" alt="Download: Windows x64 preview"></a>
     <a href="docs/ARCHITECTURE.md"><img src="https://img.shields.io/badge/network-Tailscale-aecaff?style=flat-square" alt="Network: Tailscale"></a>
     <a href="docs/ENCRYPTION.md"><img src="https://img.shields.io/badge/encryption-WireGuard_%2B_mutual_TLS-b2e6c5?style=flat-square" alt="Encryption: WireGuard plus mutual TLS, two layers"></a>
-    <a href="docs/MACOS.md"><img src="https://img.shields.io/badge/macOS-local_adapter_evidence-d9c38b?style=flat-square" alt="macOS: local adapter evidence; UI v2 and cross-device validation pending"></a>
+    <a href="docs/MACOS.md"><img src="https://img.shields.io/badge/macOS-Apple_silicon_tested-b2e6c5?style=flat-square" alt="macOS: Apple silicon tested, including a real view-only session with Windows"></a>
   </p>
   <p>
     <a href="https://github.com/Optimizer077/orbit-remote/releases/tag/v0.1.0-preview.4"><strong>Download Windows</strong></a> ·
@@ -31,7 +31,7 @@
   </picture>
 </p>
 
-> **Public development preview, with explicit limits.** Windows has local runtime evidence. Apple silicon Mac adapters have local device evidence; UI v2, cross-device sessions, Intel Macs, and Linux still need validation. Downloads are unsigned; unattended access before login and production security are not established.
+> **Public development preview, with explicit limits.** Windows has local runtime evidence. A real view-only session between Windows and an Apple-silicon Mac works in both directions (preview.4). Cross-device control, Intel Macs, and Linux still need validation. Downloads are unsigned; unattended access before login and production security are not established.
 
 Orbit Remote connects **your own** Windows, macOS, and Linux computers over your private [Tailscale](https://tailscale.com) network. Every installation is both a viewer and a host. Access comes only from an invitation you create, a certificate pinned at pairing, and the permissions the host's owner grants. Orbit runs no server or account, and it never changes your startup, firewall, or Tailscale policy on its own.
 
@@ -39,7 +39,7 @@ Orbit Remote connects **your own** Windows, macOS, and Linux computers over your
 
 ## Contents
 
-[At a glance](#at-a-glance) · [Why Orbit](#why-orbit) · [How it works](#how-it-works) · [Security](#security) · [Get started](#get-started) · [Features](#features) · [Themes](#themes) · [Platform support](#platform-support) · [Project status](#project-status) · [Develop](#develop) · [Documentation](#documentation) · [Contributing](#contributing)
+[At a glance](#at-a-glance) · [Why Orbit](#why-orbit) · [How it works](#how-it-works) · [Security](#security) · [Get started](#get-started) · [Features](#features) · [Performance](#performance) · [Themes](#themes) · [Platform support](#platform-support) · [Project status](#project-status) · [Develop](#develop) · [Documentation](#documentation) · [Contributing](#contributing)
 
 ## At a glance
 
@@ -252,7 +252,32 @@ The script detects Apple silicon or Intel and builds a matching host and package
 | Power | Optional lock and restart, gated by host policy and the device's grant. |
 | Reliability | Host supervision, owner-exit shutdown, and renewal that rechecks identity and permissions. |
 
-Screen delivery polls PNG frames. Windows hosts can skip retransmitting unchanged images, and the viewer reuses its cached frame. Optional lower-resolution frames reduce detail and transferred bytes; capture and PNG encoding still run. There is no verified FPS benchmark yet, and audio is not implemented.
+In preview.4, screen delivery polls one PNG image per update. Windows hosts skip unchanged images, and optional lower-resolution frames reduce transferred bytes. Faster frames and a hardware video stream are in development: see [Performance](#performance). Audio is not implemented.
+
+## Performance
+
+Frame rate is the current priority. Preview.4 sends one full image per update. The next steps replace that with a hardware video stream, the approach the fastest remote-desktop tools use, built and measured one stage at a time.
+
+<p align="center">
+  <picture>
+    <source media="(max-width: 767px) and (prefers-color-scheme: dark)" srcset="docs/assets/diagrams/pipeline-narrow.svg">
+    <source media="(max-width: 767px)" srcset="docs/assets/diagrams/pipeline-narrow-light.svg">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/diagrams/pipeline.svg">
+    <img src="docs/assets/diagrams/pipeline-light.svg" width="1000" alt="The hardware streaming pipeline in development, measured per stage at 3024 by 1898: GPU capture 4.4 ms per changed frame, hardware H.264 encode 5.8 to 7.6 ms (2.5 to 2.9 ms at 1080p), one stream of 2 to 26 KB per update inside the pinned mutual-TLS link, hardware decode 0.5 to 0.7 ms (2.4 to 3.3 ms on a Mac), and drawing in 0.2 ms: about 11 to 13 ms per frame plus the network, compared with about 150 to 220 ms and 1 MB per frame for the screenshot path in preview.4.">
+  </picture>
+</p>
+
+| Step | Status | Measured |
+|---|---|---|
+| Real Windows ↔ Mac session | Preview.4, over a Tailscale relay | Works both ways, view-only; about 1.8 s per full-screen PNG update. Mac → Windows negotiated TLS 1.3; Windows → Mac TLS 1.2 (ECDHE + AES-GCM) |
+| Connection reuse | Next release | Removes a TLS handshake per frame, about 1.2 s per frame on a 150 ms link |
+| Faster viewer | Next release | Binary frames on a canvas with no fixed pause: 2.0 → 3.75 updates per second on one PC |
+| PNG or JPEG, whichever is smaller | Next release | Full-screen frame 1044 → 497 KiB; on a simulated 2 Mbit/s link with 1 % loss, 5.2 → 2.5 s per frame |
+| GPU screen capture | In development | 4.4 ms per changed frame, against 155 ms for today's capture path; an unchanged screen costs nothing |
+| Hardware H.264 encode | In development | 2.5–2.9 ms per 1080p frame; 2–26 KB per update instead of about 1 MB |
+| Hardware decode in the viewer | In development | 0.5–0.7 ms on Windows, 2.4–3.3 ms on an Apple-silicon Mac; 60 and 120 fps with no dropped frames |
+
+Targets, set against what leading tools publish: 60 fps on a LAN, 10–16 ms of added latency, no freeze longer than 100 ms at 1 % packet loss, and text as sharp as full-color 4:4:4. These are per-stage measurements with synthetic content; end-to-end latency is measured next. Methods, sample sizes, and caveats are in [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 
 ## Themes
 
@@ -284,8 +309,8 @@ Every theme meets WCAG AA text contrast, uses no text smaller than 12 px, and re
 | Status | What that means today |
 |---|---|
 | **Exercised locally** | Windows capture, certificate-authenticated loopback sessions, pairing and revocation, link policy, themes, and packaged-app recovery. See the [validation record](docs/VALIDATION.md). |
-| **Native evidence and remaining validation** | Apple silicon Mac adapters were exercised locally on the checkpoint in the [Mac record](docs/MACOS-VALIDATION.md). UI v2 on Mac, Intel, Linux, and physical cross-device sessions remain pending. |
-| **Planned / unsupported** | Locked and sign-in screens, access before login, Wayland, virtual monitors, hardware video, audio, and signed updates. See [next steps](TODO.md). |
+| **Native evidence and remaining validation** | Apple silicon Mac adapters were exercised locally ([Mac record](docs/MACOS-VALIDATION.md)), and a real view-only Windows ↔ Mac session was tested in both directions on preview.4 ([validation record](docs/VALIDATION.md)). Cross-device control, Intel Macs, and Linux remain pending. |
+| **Planned / unsupported** | Locked and sign-in screens, access before login, Wayland, virtual monitors, hardware video (in development, see [Performance](#performance)), audio, and signed updates. See [next steps](TODO.md). |
 
 Completed checks and their limits are recorded in the [validation record](docs/VALIDATION.md).
 

@@ -22,7 +22,7 @@ Environment: Windows x64, .NET SDK 10.0.200, Node.js 24.20.0, Electron 45.0.0, i
 
 ## Not established by these checks
 
-- Real sessions between two separate physical computers or over a DERP relay.
+- Longer cross-device sessions, repeated sleep/wake and diverse networks. The separate physical Windows/Mac relay run is recorded below.
 - Valid native keyboard/mouse injection, clipboard writes, actual lock, actual OS restart, or startup-at-sign-in registration. The tests intentionally avoid these desktop side effects.
 - Locked/sign-in/UAC screen support or reboot recovery before a user logs in. These are unsupported in this build.
 - macOS or Linux runtime correctness, permission UX, packaging/signing, or any Wayland support.
@@ -30,3 +30,65 @@ Environment: Windows x64, .NET SDK 10.0.200, Node.js 24.20.0, Electron 45.0.0, i
 - Hardware video encoding, audio, long-run stability, large-scale performance, independent security review, or production suitability.
 
 Future device validation should record exact OS/hardware, monitor/DPI layout, keyboard layout, source commit, Tailscale connection type, permission state, tests performed, failures, and recovery steps. See `PLAN.md` for the release gates.
+
+## Cross-device: Windows and Apple silicon Mac, preview.4
+
+On 26 October 2026, separate Windows x64 and Apple silicon Mac machines ran
+isolated packaged builds from `v0.1.0-preview.4`, internal source
+`b59e97e96400d067a6e22bdfc6ba6688613ec2f5`. Both used temporary profiles and
+ports 47841/47842. The normal installations, startup settings, firewall and
+Tailscale settings were not changed. The [Mac record](MACOS-VALIDATION.md)
+contains the native Mac environment and its separate evidence.
+
+Both directions paired through separate single-use invitations transferred by
+Taildrop. Only the exact test files were read and consumed. Each pairing granted
+view alone; control, clipboard, files and power remained disabled. The Windows
+test profile was restarted before its invitation was created; a stale posted
+code prefix was corrected. The Mac agent reported that its initial comparison
+guard failed to stop the shell from pairing. The current code was subsequently
+confirmed before continuing. This run does not establish a successful automated
+pre-pair comparison guard or a full out-of-band human code comparison.
+
+| Viewer → host | Frames | Request median / p95 | PNG body median / p95 | Negotiated encryption | Path |
+|---|---:|---:|---:|---|---|
+| Mac → Windows | 30 | 1861.6 / 2691.5 ms | 961,520 / 997,753 bytes | TLS 1.3, AES-256-GCM, forward secrecy | Relayed |
+| Windows → Mac | 30 | 1774 / 6159 ms | 1,356,477 / 3,168,046 bytes | TLS 1.2, AES-256-GCM, forward secrecy | Relayed |
+
+Actual remote images were received in both directions, and the Windows viewer's
+separate screen window displayed a Mac frame. No real-screen screenshots, frame
+files, private addresses or machine identifiers were retained in the evidence.
+Timings include controller and Electron IPC overhead; they exclude the 260 ms
+inter-request pause. The Mac measurement also had concurrent real viewer
+polling, while the Windows measurement used sequential owner IPC before opening
+the screen window. These are different sampling conditions, not an encoding
+speed comparison or an advertised frame rate.
+
+Neither sample reported an unchanged response. The Windows desktop was changing,
+so this does not test idle-screen 304 reuse. This Mac build does not advertise
+conditional-frame support. Read-only Windows diagnostics still observed a relay
+after three ping attempts with UDP available; no NAT/firewall changes were made.
+
+The Windows host's **Disconnect all** ended the Mac viewing session. The Mac's
+main Connections view immediately reported **Connection ended** with zero
+controller sessions. The heading was no longer visible after 15 seconds, while
+zero outgoing sessions persisted at later checks around 45 seconds and two
+minutes. The reason for the disappearing main-view heading remains unresolved.
+
+The Mac host's **Disconnect all** also ended the reverse session. The Windows
+popout closed automatically instead of retaining an ended explanation. A
+read-only check of the isolated application confirmed one main window, no
+popout and zero outgoing sessions. The frozen main process closes a popout when
+its controller session disappears. Both directions therefore removed access
+without an observed automatic resumption, but the requested persistent ended
+screen did not pass. Both UI findings were handed to the interface owner. The
+Windows test app was then closed and its active temporary profile removed. Its
+two unused profiles from pre-invitation harness starts had their known Orbit
+state and identity files removed individually; inert Chromium caches remained.
+No test listener remained on either isolated port.
+
+A proposed Mac test-only socket interruption failed in instrumentation before
+injecting any fault. No 10-second outage/recovery result is established. Native
+input, clipboard, file transfer, power, locked screens, virtual displays,
+long-run stability and direct-path performance were not exercised in this run.
+Later keep-alive, JPEG, adaptive quality and video work is absent from this
+baseline and requires a separate measurement.
