@@ -14,9 +14,10 @@ public interface IPlatformBackend : IAsyncDisposable
 
 public sealed record PlatformStatus(string OperatingSystem, string SessionState, bool CanCapture,
     bool CanInput, bool CanClipboard, bool CanLock, IReadOnlyList<MonitorInfo> Monitors,
-    IReadOnlyList<string> Limitations);
+    IReadOnlyList<string> Limitations, bool CanScaleFrames = false, bool CanConditionalFrames = false);
 public sealed record MonitorInfo(string Id, string Name, int Left, int Top, int Width, int Height, bool Primary);
-public sealed record ScreenFrame(byte[] Png, int Width, int Height, int Left, int Top, DateTimeOffset CapturedUtc);
+public sealed record ScreenFrame(byte[] Png, int Width, int Height, int Left, int Top, DateTimeOffset CapturedUtc,
+    byte[]? RawBgra = null, string? MonitorId = null);
 public sealed record RemoteInput(string Kind, int X = 0, int Y = 0, string? Button = null,
     string? Key = null, bool? IsDown = null, int DeltaX = 0, int DeltaY = 0);
 

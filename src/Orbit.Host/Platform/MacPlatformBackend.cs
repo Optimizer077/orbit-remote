@@ -123,8 +123,19 @@ internal sealed class MacPlatformBackend : IPlatformBackend
         PlatformLimits.CheckPointer(input, monitors);
         var monitor = monitors.First(m => input.X >= m.Left && input.Y >= m.Top && (long)input.X < (long)m.Left + m.Width && (long)input.Y < (long)m.Top + m.Height);
         var bounds = Native.CGDisplayBounds(uint.Parse(monitor.Id, CultureInfo.InvariantCulture));
-        return new Native.Point { X = bounds.Origin.X + (input.X - monitor.Left) * bounds.Size.Width / monitor.Width,
-            Y = bounds.Origin.Y + (input.Y - monitor.Top) * bounds.Size.Height / monitor.Height };
+        var point = MapDisplayPoint(input, monitor, bounds.Origin.X, bounds.Origin.Y, bounds.Size.Width, bounds.Size.Height);
+        return new Native.Point { X = point.X, Y = point.Y };
+    }
+
+    // The wire protocol uses native pixels in disjoint per-display ranges. macOS
+    // posts input in global points, whose origins can be negative and whose scale
+    // can differ for each display. Keep those two coordinate spaces separate.
+    internal static (double X, double Y) MapDisplayPoint(RemoteInput input, MonitorInfo monitor,
+        double left, double top, double width, double height)
+    {
+        PlatformLimits.CheckPointer(input, [monitor]);
+        return (left + (input.X - monitor.Left) * width / monitor.Width,
+            top + (input.Y - monitor.Top) * height / monitor.Height);
     }
 
     public async Task<string> ReadClipboardAsync(CancellationToken cancellationToken = default)
@@ -164,7 +175,9 @@ internal sealed class MacPlatformBackend : IPlatformBackend
         try
         {
             if (DictionaryBoolean(session, "CGSSessionScreenIsLocked") == true) return "locked";
-            if (DictionaryBoolean(session, "kCGSessionOnConsoleKey") != true || DictionaryBoolean(session, "kCGSessionLoginDoneKey") != true)
+            // kCGSessionOnConsoleKey is a CFSTR macro whose actual dictionary
+            // value contains CGS; it is not a dynamically exported symbol.
+            if (DictionaryBoolean(session, "kCGSSessionOnConsoleKey") != true || DictionaryBoolean(session, "kCGSessionLoginDoneKey") != true)
                 return "non-interactive";
             return "interactive";
         }
@@ -176,10 +189,15 @@ internal sealed class MacPlatformBackend : IPlatformBackend
         var key = Native.CFStringCreateWithCString(IntPtr.Zero, name, 0x08000100);
         try
         {
-            var value = Native.CFDictionaryGetValue(dictionary, key);
-            return value == IntPtr.Zero ? null : Native.CFBooleanGetValue(value);
+            return DictionaryBoolean(dictionary, key);
         }
         finally { Native.CFRelease(key); }
+    }
+
+    private static bool? DictionaryBoolean(IntPtr dictionary, IntPtr key)
+    {
+        var value = Native.CFDictionaryGetValue(dictionary, key);
+        return value == IntPtr.Zero ? null : Native.CFBooleanGetValue(value);
     }
 
     private static List<MonitorInfo> GetMonitors()
@@ -191,11 +209,20 @@ internal sealed class MacPlatformBackend : IPlatformBackend
         var result = new List<MonitorInfo>();
         foreach (var display in displays.Take(checked((int)count)))
         {
-            // Give each native-pixel display an unambiguous horizontal coordinate range. Mixed Retina
-            // scales cannot share CG point origins without overlapping pixel rectangles.
-            result.Add(new MonitorInfo(display.ToString(CultureInfo.InvariantCulture), $"Display {display}",
-                result.Sum(x => x.Width), 0, checked((int)Native.CGDisplayPixelsWide(display)),
-                checked((int)Native.CGDisplayPixelsHigh(display)), display == primary));
+            // CGDisplayPixelsWide/High return point-sized dimensions on Retina.
+            // Capture emits backing pixels, so use the active mode's pixel size.
+            var mode = Native.CGDisplayCopyDisplayMode(display);
+            if (mode == IntPtr.Zero) throw new PlatformUnavailableException("display-changed", "The active display mode is unavailable.");
+            try
+            {
+                var width = checked((int)Native.CGDisplayModeGetPixelWidth(mode));
+                var height = checked((int)Native.CGDisplayModeGetPixelHeight(mode));
+                PlatformLimits.CheckDimensions(width, height);
+                // Disjoint pixel ranges also prevent overlap on mixed-DPI layouts.
+                result.Add(new MonitorInfo(display.ToString(CultureInfo.InvariantCulture), $"Display {display}",
+                    checked(result.Sum(x => x.Width)), 0, width, height, display == primary));
+            }
+            finally { Native.CGDisplayModeRelease(mode); }
         }
         return result;
     }
@@ -226,8 +253,10 @@ internal sealed class MacPlatformBackend : IPlatformBackend
         [DllImport(CoreGraphics)] internal static extern uint CGGetActiveDisplayList(uint maximum, [Out] uint[] displays, out uint count);
         [DllImport(CoreGraphics)] internal static extern uint CGMainDisplayID();
         [DllImport(CoreGraphics)] internal static extern Rect CGDisplayBounds(uint display);
-        [DllImport(CoreGraphics)] internal static extern nuint CGDisplayPixelsWide(uint display);
-        [DllImport(CoreGraphics)] internal static extern nuint CGDisplayPixelsHigh(uint display);
+        [DllImport(CoreGraphics)] internal static extern IntPtr CGDisplayCopyDisplayMode(uint display);
+        [DllImport(CoreGraphics)] internal static extern nuint CGDisplayModeGetPixelWidth(IntPtr mode);
+        [DllImport(CoreGraphics)] internal static extern nuint CGDisplayModeGetPixelHeight(IntPtr mode);
+        [DllImport(CoreGraphics)] internal static extern void CGDisplayModeRelease(IntPtr mode);
         [DllImport(CoreGraphics)] internal static extern IntPtr CGSessionCopyCurrentDictionary();
         [DllImport(CoreGraphics)] internal static extern IntPtr CGEventCreateKeyboardEvent(IntPtr source, ushort key, [MarshalAs(UnmanagedType.I1)] bool down);
         [DllImport(CoreGraphics)] internal static extern IntPtr CGEventCreateMouseEvent(IntPtr source, uint type, Point position, uint button);

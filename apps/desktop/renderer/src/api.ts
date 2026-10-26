@@ -6,21 +6,31 @@ export type Permissions = {
   power: boolean;
 };
 
-export type ThemePreference = 'orbit' | 'midnight' | 'paper' | 'system';
+export type ResolvedTheme = 'daylight' | 'graphite' | 'midnight' | 'paper';
+export type ThemePreference = ResolvedTheme | 'system';
 export const THEME_STORAGE_KEY = 'orbit.theme';
-const THEME_KEYS = new Set<ThemePreference>(['orbit', 'midnight', 'paper', 'system']);
+const THEME_KEYS = new Set<ThemePreference>(['daylight', 'graphite', 'midnight', 'paper', 'system']);
+const DARK_THEMES = new Set<ResolvedTheme>(['graphite', 'midnight']);
 
+// Missing, unknown and legacy values (the removed 'orbit' theme) follow the system.
 export function readThemePreference(): ThemePreference {
   try {
     const value = localStorage.getItem(THEME_STORAGE_KEY);
-    return value && THEME_KEYS.has(value as ThemePreference) ? value as ThemePreference : 'orbit';
-  } catch { return 'orbit'; }
+    return value && THEME_KEYS.has(value as ThemePreference) ? value as ThemePreference : 'system';
+  } catch { return 'system'; }
+}
+
+// 'system' (and anything unrecognised) resolves to Daylight in light mode and Graphite in dark mode.
+export function resolveTheme(preference: ThemePreference): ResolvedTheme {
+  if (preference !== 'system' && THEME_KEYS.has(preference)) return preference;
+  const prefersDark = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  return prefersDark ? 'graphite' : 'daylight';
 }
 
 export function applyTheme(preference: ThemePreference) {
-  const resolved = preference === 'system' ? window.matchMedia('(prefers-color-scheme: light)').matches ? 'paper' : 'midnight' : preference;
+  const resolved = resolveTheme(preference);
   document.documentElement.dataset.theme = resolved;
-  document.documentElement.style.colorScheme = resolved === 'paper' ? 'light' : 'dark';
+  document.documentElement.style.colorScheme = DARK_THEMES.has(resolved) ? 'dark' : 'light';
 }
 
 export type Device = {

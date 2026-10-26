@@ -23,7 +23,8 @@ internal sealed class WindowsPlatformBackend : IPlatformBackend
             ready, ready, monitors,
             ["Logged-in interactive desktops only. Lock screens, sign-in, UAC secure desktop and session 0 are not supported by this backend.",
              "Windows integrity isolation prevents input to elevated applications. Launch the desktop agent at the same integrity level as the application you intend to control.",
-             "PNG snapshot transport is a baseline; hardware video encoding and audio are not implemented."]));
+             "PNG snapshot transport is a baseline; hardware video encoding and audio are not implemented."],
+             CanScaleFrames: ready && monitors.Count > 0, CanConditionalFrames: ready && monitors.Count > 0));
     }
 
     public Task<ScreenFrame> CaptureAsync(string? monitorId = null, CancellationToken cancellationToken = default) =>
@@ -57,7 +58,7 @@ internal sealed class WindowsPlatformBackend : IPlatformBackend
             var data = new byte[checked(monitor.Width * monitor.Height * 4)];
             Marshal.Copy(pixels, data, 0, data.Length);
             return new ScreenFrame(PngEncoder.EncodeBgra(data, monitor.Width, monitor.Height, cancellationToken),
-                monitor.Width, monitor.Height, monitor.Left, monitor.Top, DateTimeOffset.UtcNow);
+                monitor.Width, monitor.Height, monitor.Left, monitor.Top, DateTimeOffset.UtcNow, data, monitor.Id);
         }
         finally
         {

@@ -10,7 +10,7 @@ const hostDirectory = path.resolve(__dirname, '../../artifacts/host', runtime);
 
 module.exports = {
   appId: 'dev.orbit.remote', productName: 'Orbit Remote',
-  directories: { output: 'release/preview', buildResources: 'build' },
+  directories: { output: process.env.ORBIT_PACKAGE_OUTPUT || 'release/preview', buildResources: 'build' },
   files: ['dist/**/*', 'electron/**/*', 'package.json', '!electron/*.test.cjs', '!electron/test-fixtures/**/*'],
   extraResources: [
     { from: hostDirectory, to: 'host' },
@@ -27,6 +27,17 @@ module.exports = {
     createDesktopShortcut: false, createStartMenuShortcut: true,
   },
   portable: { artifactName: 'Orbit-Remote-Portable-${version}-${arch}.${ext}', requestExecutionLevel: 'user' },
-  mac: { target: ['dmg'], icon: 'build/icons/icon.icns', category: 'public.app-category.productivity', artifactName: 'Orbit-Remote-${version}-${arch}.${ext}' },
+  mac: {
+    target: ['dmg'], icon: 'build/icons/icon.icns', category: 'public.app-category.productivity',
+    artifactName: 'Orbit-Remote-${version}-${arch}.${ext}',
+    hardenedRuntime: true,
+    entitlements: 'build/entitlements.mac.plist',
+    entitlementsInherit: 'build/entitlements.mac.inherit.plist',
+    binaries: ['Contents/Resources/host/Orbit.Host'],
+    darkModeSupport: true,
+    // A local preview can be ad-hoc signed without pretending to be a Developer
+    // ID release. Hardened library validation requires a real shared Team ID.
+    ...(process.env.ORBIT_MAC_ADHOC_SIGN === '1' ? { identity: '-', hardenedRuntime: false, notarize: false } : {}),
+  },
   linux: { target: ['AppImage', 'deb'], icon: 'build/icons/icon.png', category: 'Network', artifactName: 'Orbit-Remote-${version}-${arch}.${ext}' },
 };

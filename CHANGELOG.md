@@ -2,6 +2,27 @@
 
 Changes are documented by preview release. Application/package version `0.1.0` identifies the current development line; `v0.1.0-preview.1` identifies its initial preview distribution. The [validation record](docs/VALIDATION.md) is the source for completed checks, and [TODO.md](TODO.md) tracks remaining work.
 
+## 0.1.0-preview.3 — 2026-10-26
+
+### A new interface
+
+- New themes: **Daylight** (bright default) and **Graphite** (neutral dark), plus refreshed Midnight and Paper. The green "Orbit" theme is retired; a saved Orbit preference now follows the system (Daylight in light mode, Graphite in dark mode).
+- Larger, clearer type (nothing below 12 px), stronger surface separation, and WCAG AA text contrast in every theme.
+- Redesigned Overview: real-state tiles for network, protection (layer chips and the security code), and sessions; device cards with one-click Connect / View only; a guided first pairing.
+- Redesigned Devices, Activity, and Settings pages with search, filters, and keyboard-visible focus.
+- **Command palette (Ctrl/⌘ K):** jump to any page, connect to a device, add or join a device, copy the security code, or switch theme.
+- **Session HUD:** a floating, auto-hiding toolbar with a link-quality meter measured from real screen updates, an encryption chip, and Reconnecting / Ended overlays. Input is paused while the stream fails.
+
+### Weaker networks (host side)
+
+- **Unchanged screens cost almost nothing:** the viewer asks with the last frame's validator and the host answers `304 Not Modified` when the screen hasn't changed, so the viewer reuses its cached image. An optional clamped `scale` (0.33–1) can shrink frames. Windows hosts support both; macOS and Linux hosts keep full-scale frames. This saves transferred bytes, not capture time.
+- **Fairer sharing:** each paired device may hold at most 2 sessions (pop-out windows share one), and ending a view-only session no longer interrupts whoever is in control.
+
+### Notes
+
+- Windows binaries only. macOS and Linux run from source; this interface has not yet been validated on macOS.
+- Evidence: 194 host checks, 54 desktop checks, production build, and the real Windows Electron end-to-end test. On macOS, native capture/control and the frame fallback were exercised separately; this interface itself is not yet validated there.
+
 ## 0.1.0-preview.2 — 2026-10-26
 
 - Enforce TLS 1.3 or TLS 1.2 with ECDHE and AEAD on both peers; show measured encryption and comparable device security codes.

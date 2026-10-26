@@ -1,5 +1,14 @@
 # Orbit Remote architecture
 
+<p align="center">
+  <picture>
+    <source media="(max-width: 767px) and (prefers-color-scheme: dark)" srcset="assets/diagrams/architecture-narrow.svg">
+    <source media="(max-width: 767px)" srcset="assets/diagrams/architecture-narrow-light.svg">
+    <source media="(prefers-color-scheme: dark)" srcset="assets/diagrams/architecture.svg">
+    <img src="assets/diagrams/architecture-light.svg" width="1000" alt="Orbit Remote architecture: the viewer computer's Electron app (renderer, preload IPC bridge, main process with transport and controller) sends pinned mutual-TLS requests inside a Tailscale WireGuard tunnel to the host computer's .NET Orbit host, which passes five gates (link policy, Tailscale source check, certificate pin, grants, session) before frame, input, clipboard, file, and power services drive the existing desktop through platform adapters.">
+  </picture>
+</p>
+
 Orbit connects a viewer to an explicitly paired host over an existing Tailscale network. Every installation can perform both roles. The current application shares an existing, signed-in, unlocked desktop; it does not create a separate login session or provide access to preboot screens.
 
 This document describes the preview implementation and the boundaries that future work must preserve. Windows has local runtime evidence. macOS and Linux backends need native device validation; see [VALIDATION.md](VALIDATION.md). Read the [protocol](PROTOCOL.md) for exact routes and limits and [SECURITY.md](../SECURITY.md) for the threat model.

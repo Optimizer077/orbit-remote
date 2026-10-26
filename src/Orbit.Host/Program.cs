@@ -184,7 +184,8 @@ app.MapPost("/api/invites", (HttpContext context, InviteRequest request) => Loca
 app.MapDelete("/api/peers/{id}", async (HttpContext context, string id) =>
 {
     if (!IsLocal(context)) return Results.NotFound();
-    if (!state.Revoke(id)) return Results.NotFound();
+    if (!state.Revoke(id, out var revokedControllingSession)) return Results.NotFound();
+    if (!revokedControllingSession) return Results.NoContent();
     await inputGate.WaitAsync(context.RequestAborted);
     try { await platform.ReleaseInputsAsync(context.RequestAborted); inputLeases.Clear(); } finally { inputGate.Release(); }
     return Results.NoContent();
@@ -229,7 +230,8 @@ app.MapGet("/api/sessions/{id}", (HttpContext context, string id) => Session(con
 app.MapDelete("/api/sessions/{id}", async (HttpContext context, string id) =>
 {
     var deviceId = IsLocal(context) ? null : Peer(context)?.Id;
-    if (!IsLocal(context) && deviceId is null || !state.EndSession(id, deviceId)) return Results.NotFound();
+    if (!IsLocal(context) && deviceId is null || !state.EndSession(id, deviceId, out var endedControllingSession)) return Results.NotFound();
+    if (!endedControllingSession) return Results.NoContent();
     await inputGate.WaitAsync(context.RequestAborted);
     try { await platform.ReleaseInputsAsync(context.RequestAborted); inputLeases.Clear(); } finally { inputGate.Release(); }
     return Results.NoContent();
@@ -239,6 +241,14 @@ app.MapGet("/api/sessions/{id}/frame", async (HttpContext context, string id) =>
     var session = Session(context, id, p => p.View); if (session is null) return Results.NotFound();
     var requestedMonitor = context.Request.Query["monitorId"];
     if (requestedMonitor.Count > 1) return Results.BadRequest(new { error = "Supply only one monitorId per frame request." });
+    if (context.Request.Query.Keys.Any(key => key is not "monitorId" and not "scale"))
+        return Results.BadRequest(new { error = "Only monitorId and optional scale are supported; frames use PNG." });
+    var requestedScale = context.Request.Query["scale"];
+    if (requestedScale.Count > 1) return Results.BadRequest(new { error = "Supply only one scale per frame request." });
+    var scale = FrameQuality.ParseScale(requestedScale.Count == 0 ? null : requestedScale.ToString());
+    var validators = context.Request.Headers.IfNoneMatch;
+    if (validators.Count > 1) return Results.BadRequest(new { error = "Supply only one If-None-Match validator." });
+    var validator = FrameQuality.ParseConditionalTag(validators.Count == 0 ? null : validators.ToString());
     // A viewer may select any existing host monitor while sharing its authenticated
     // control session with other windows; this does not create a virtual display.
     var monitorId = Security.SelectFrameMonitor(requestedMonitor.Count == 0 ? null : requestedMonitor.ToString(), session.MonitorId);
@@ -249,10 +259,17 @@ app.MapGet("/api/sessions/{id}/frame", async (HttpContext context, string id) =>
         if (state.FindDevice(Peer(context)!.Fingerprint) is null || state.GetSession(id, session.DeviceId) is null) return Results.NotFound();
         var frame = await platform.CaptureAsync(monitorId, context.RequestAborted);
         if (Session(context, id, p => p.View) is null) return Results.NotFound();
+        var prepared = FrameQuality.Prepare(frame, session.Id, session.ResumeEpoch, monitorId, scale, validator, context.RequestAborted);
+        // Hashing/downscaling can take time: authorization must still hold before
+        // sending either pixels or a conditional heartbeat with cached geometry.
+        if (Session(context, id, p => p.View) is null) return Results.NotFound();
         context.Response.Headers["X-Orbit-Width"] = frame.Width.ToString(); context.Response.Headers["X-Orbit-Height"] = frame.Height.ToString();
         context.Response.Headers["X-Orbit-Left"] = frame.Left.ToString(); context.Response.Headers["X-Orbit-Top"] = frame.Top.ToString();
+        context.Response.Headers["X-Orbit-Encoded-Width"] = prepared.EncodedWidth.ToString(); context.Response.Headers["X-Orbit-Encoded-Height"] = prepared.EncodedHeight.ToString();
+        context.Response.Headers["X-Orbit-Scale"] = prepared.Scale.ToString("0.################", System.Globalization.CultureInfo.InvariantCulture);
+        if (prepared.ETag is not null) context.Response.Headers.ETag = prepared.ETag;
         context.Response.Headers["X-Orbit-Captured-At"] = frame.CapturedUtc.ToString("O");
-        return Results.Bytes(frame.Png, "image/png");
+        return prepared.NotModified ? Results.StatusCode(StatusCodes.Status304NotModified) : Results.Bytes(prepared.Png, "image/png");
     }
     finally { captureGate.Release(); }
 });
@@ -296,6 +313,8 @@ app.MapPut("/api/sessions/{id}/clipboard", async (HttpContext context, string id
 });
 app.MapPost("/api/sessions/{id}/power", async (HttpContext context, string id, PowerRequest request) =>
 {
+    // Denied requests must not queue behind or delay another device's input.
+    if (Session(context, id, p => p.Power && p.Control) is null || !state.Settings.AllowRemotePower) return Results.NotFound();
     await inputGate.WaitAsync(context.RequestAborted);
     try
     {

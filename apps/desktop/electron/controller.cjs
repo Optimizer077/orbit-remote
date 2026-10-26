@@ -4,6 +4,26 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { request, remoteRequest, parseInvite, validateAddress, normalizeFingerprint } = require('./transport.cjs');
 
+const MIN_FRAME_SCALE = 0.33; // Matches FrameQuality.MinimumScale on the host.
+
+// Optional renderer-requested downscale. Absent means lossless full resolution.
+function frameScale(value) {
+  if (value === undefined || value === null) return 1;
+  if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error('Invalid frame scale.');
+  return Math.min(1, Math.max(MIN_FRAME_SCALE, Math.round(value * 1000) / 1000));
+}
+
+// Mirrors FrameQuality.ParseConditionalTag: one bounded, quoted, printable-ASCII validator.
+function isValidator(value) {
+  return typeof value === 'string' && value.length >= 2 && value.length <= 128 && value[0] === '"' && value.at(-1) === '"' &&
+    !/[",\\]/.test(value.slice(1, -1)) && /^[\x21-\x7e]+$/.test(value);
+}
+
+function positive(value) {
+  const number = Number(value);
+  return value !== undefined && Number.isInteger(number) && number > 0 ? number : undefined;
+}
+
 class OrbitController {
   constructor(options) {
     this.controlUrl = options.controlUrl || 'http://127.0.0.1:47831';
@@ -201,12 +221,16 @@ class OrbitController {
         if (!remoteId) throw new Error('Device did not create a session.');
         const localId = crypto.randomUUID();
         const monitors = info.platform?.monitors || info.monitors || [];
+        // Hosts advertise raw-frame features only when they can honor them (Windows today).
+        // Mac/Linux omit them and keep receiving full-scale, unconditional PNG frames.
         this.sessions.set(localId, { device, remoteId, monitors, monitorId: payload.monitorId || null,
+          canScaleFrames: info.platform?.canScaleFrames === true, canConditionalFrames: info.platform?.canConditionalFrames === true,
           resumeEpoch: typeof result.resumeEpoch === 'string' && result.resumeEpoch.length <= 128 ? result.resumeEpoch : null,
           permissions: result.permissions || device.permissions, viewOnly: payload.viewOnly === true,
           startedAt: new Date().toISOString(), frame: null, frameSlots: new Map(), renewPending: null, inputQueue: Promise.resolve(),
           closed: false, inputEpoch: 0, pendingInputCount: 0, pendingMove: null });
-        return { sessionId: localId, deviceId: device.id, permissions: result.permissions || device.permissions, monitors, link: created.link };
+        return { sessionId: localId, deviceId: device.id, permissions: result.permissions || device.permissions, monitors, link: created.link,
+          canScaleFrames: info.platform?.canScaleFrames === true, canConditionalFrames: info.platform?.canConditionalFrames === true };
       }
       case 'session.monitors': {
         const s = this.getSession(payload);
@@ -229,11 +253,15 @@ class OrbitController {
         const requestedMonitor = Object.hasOwn(payload, 'monitorId') ? payload.monitorId || null : s.monitorId;
         if (requestedMonitor !== null && (typeof requestedMonitor !== 'string' || !s.monitors.some(m => m.id === requestedMonitor)))
           throw new Error('Choose an available remote monitor.');
+        const requestedScale = frameScale(payload.scale); // Validates even when the host cannot scale.
+        const scale = s.canScaleFrames ? requestedScale : 1;
         const key = requestedMonitor || '';
         const slots = s.frameSlots ||= new Map();
-        const slot = slots.get(key) || { frame: null, pending: null };
+        const slot = slots.get(key) || { frame: null, pending: null, cache: null };
         slots.set(key, slot);
         if (slot.pending) return slot.pending;
+        // A cached image is reusable only at the scale it was encoded for.
+        if (slot.cache && slot.cache.scale !== scale) slot.cache = null;
         slot.pending = (async () => {
           const renewSession = async failedId => {
             this.assertSession(payload.sessionId, s);
@@ -244,7 +272,7 @@ class OrbitController {
               s.inputEpoch = (s.inputEpoch || 0) + 1;
               s.pendingMove = null;
               s.frame = null;
-              for (const entry of slots.values()) entry.frame = null;
+              for (const entry of slots.values()) { entry.frame = null; entry.cache = null; }
               await (s.inputQueue || Promise.resolve()).catch(() => {});
               this.assertSession(payload.sessionId, s);
               const replacement = (await this.remote(s.device, '/api/sessions', { method: 'POST', body: {
@@ -263,10 +291,19 @@ class OrbitController {
           if (s.renewPending) await s.renewPending;
           const failedId = s.remoteId;
           let capturedId;
+          let sentTag = null;
           const capture = () => {
             capturedId = s.remoteId;
-            return this.remote(s.device, '/api/sessions/' + encodeURIComponent(capturedId) + '/frame' +
-              (requestedMonitor ? '?monitorId=' + encodeURIComponent(requestedMonitor) : ''), { maxBytes: 24 * 1024 * 1024 });
+            const query = new URLSearchParams();
+            if (requestedMonitor) query.set('monitorId', requestedMonitor);
+            if (scale < 1) query.set('scale', String(scale));
+            // Revalidate only this slot's own image, from this exact remote session and scale.
+            const cache = slot.cache;
+            sentTag = s.canConditionalFrames && cache && cache.remoteId === capturedId && cache.resumeEpoch === s.resumeEpoch &&
+              cache.scale === scale ? cache.etag : null;
+            const search = query.toString();
+            return this.remote(s.device, '/api/sessions/' + encodeURIComponent(capturedId) + '/frame' + (search ? '?' + search : ''),
+              { maxBytes: 24 * 1024 * 1024, ...(sentTag ? { headers: { 'if-none-match': sentTag } } : {}) });
           };
           let frame;
           try {
@@ -281,14 +318,42 @@ class OrbitController {
           }
           this.assertSession(payload.sessionId, s);
           if (capturedId !== s.remoteId || s.renewPending) throw new Error('The session reconnected. Wait for a fresh screen.');
-          const number = (name, fallback = 0) => Number(frame.headers[name] ?? fallback);
+          const headers = frame.headers || {};
+          const number = (name, fallback = 0) => Number(headers[name] ?? fallback);
+          if (frame.status === 304) {
+            const cache = slot.cache;
+            // Only an answer to the exact validator sent for this slot can reuse its pixels and geometry.
+            const echoed = headers.etag === undefined || headers.etag === sentTag;
+            const sameGeometry = !cache || ['width', 'height', 'left', 'top'].every(name =>
+              headers['x-orbit-' + name] === undefined || number('x-orbit-' + name) === cache.frame[name]);
+            if (!sentTag || !cache || cache.etag !== sentTag || !echoed || !sameGeometry) {
+              slot.cache = null;
+              throw Object.assign(new Error('The device sent an unexpected unchanged-screen reply. Wait for a fresh screen.'), { status: 304 });
+            }
+            slot.frame = cache.frame;
+            if (requestedMonitor === (s.monitorId || null)) s.frame = slot.frame;
+            return { ...cache.frame, encodedWidth: cache.encodedWidth, encodedHeight: cache.encodedHeight, scale: cache.scale,
+              dataUrl: cache.dataUrl, link: frame.link, unchanged: true, bytes: 0 };
+          }
           slot.frame = { width: number('x-orbit-width'), height: number('x-orbit-height'),
             left: number('x-orbit-left'), top: number('x-orbit-top') };
           if (requestedMonitor === (s.monitorId || null)) s.frame = slot.frame;
-          return { ...slot.frame, dataUrl: 'data:image/png;base64,' + frame.buffer.toString('base64'), link: frame.link };
+          const encodedWidth = positive(headers['x-orbit-encoded-width']) ?? slot.frame.width;
+          const encodedHeight = positive(headers['x-orbit-encoded-height']) ?? slot.frame.height;
+          const reportedScale = Number(headers['x-orbit-scale']);
+          const actualScale = Number.isFinite(reportedScale) && reportedScale > 0 && reportedScale <= 1 ? reportedScale : 1;
+          const buffer = frame.buffer || Buffer.alloc(0);
+          const dataUrl = 'data:image/png;base64,' + buffer.toString('base64');
+          const etag = s.canConditionalFrames && isValidator(headers.etag) ? headers.etag : null;
+          slot.cache = etag ? { etag, scale, remoteId: capturedId, resumeEpoch: s.resumeEpoch, frame: slot.frame,
+            encodedWidth, encodedHeight, dataUrl } : null;
+          return { ...slot.frame, encodedWidth, encodedHeight, scale: actualScale, dataUrl, link: frame.link,
+            unchanged: false, bytes: buffer.length };
         })();
         try { return await slot.pending; }
         catch (error) {
+          // Any failure (401 revocation, 410 host stop, network) forgets this slot's validator.
+          slot.cache = null;
           if (error.status === 410) {
             this.endedSessions.set(payload.sessionId, String(error.message || 'Session ended by host. Connect again explicitly.').slice(0, 500));
             if (this.endedSessions.size > 64) this.endedSessions.delete(this.endedSessions.keys().next().value);
@@ -296,7 +361,7 @@ class OrbitController {
             s.inputEpoch = (s.inputEpoch || 0) + 1;
             s.pendingMove = null;
             s.frame = null;
-            for (const entry of slots.values()) entry.frame = null;
+            for (const entry of slots.values()) { entry.frame = null; entry.cache = null; }
             if (this.sessions.get(payload.sessionId) === s) this.sessions.delete(payload.sessionId);
           }
           throw error;

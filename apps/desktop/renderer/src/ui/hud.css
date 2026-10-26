@@ -1,0 +1,127 @@
+/* Session HUD (U4). Component-scoped; theme values come only from U1's variables. */
+.hud{
+  --hud-glass-a:color-mix(in srgb,var(--surface-raised) 86%,transparent);
+  --hud-glass-b:color-mix(in srgb,var(--surface) 82%,transparent);
+  --hud-edge:color-mix(in srgb,var(--line-strong) 75%,transparent);
+  --hud-inset:color-mix(in srgb,var(--surface-inset,var(--surface)) 72%,transparent);
+  --hud-ease:cubic-bezier(.2,.9,.25,1.15);
+  position:relative;isolation:isolate;min-width:0;
+}
+.hud-stage{position:relative;z-index:0;transition:filter .3s ease}
+.hud-stage>*{margin:0}
+.hud-reconnecting .hud-stage{filter:grayscale(.85) brightness(.62) blur(1px)}
+.hud-ended .hud-stage{filter:grayscale(1) brightness(.45) blur(2px)}
+
+/* Overlay (reconnecting / ended): blocks input to the stale image, keeps it visible. */
+.hud-veil{position:absolute;inset:0;z-index:1;display:grid;place-items:center;padding:110px 24px 24px;
+  background:radial-gradient(ellipse at center,color-mix(in srgb,var(--viewer-bg,#000) 30%,transparent),color-mix(in srgb,var(--viewer-bg,#000) 55%,transparent))}
+.hud-card{width:min(420px,100%);text-align:center;padding:24px 26px 22px;border-radius:var(--radius-xl,18px);
+  background:linear-gradient(180deg,var(--hud-glass-a),var(--hud-glass-b));border:1px solid var(--hud-edge);
+  -webkit-backdrop-filter:blur(22px) saturate(1.5);backdrop-filter:blur(22px) saturate(1.5);
+  box-shadow:var(--elev-3,0 18px 48px rgb(0 0 0 / .32)),inset 0 1px 0 color-mix(in srgb,#fff 10%,transparent);color:var(--text);
+  animation:hud-card-in .28s var(--hud-ease) both}
+.hud-card-icon{display:inline-grid;place-items:center;width:46px;height:46px;border-radius:50%;margin-bottom:12px;
+  color:var(--text);background:var(--hud-inset);border:1px solid var(--line-strong)}
+.hud-ended .hud-card-icon{color:var(--danger-text)}
+.hud-card h2{margin:0;font-size:18px;line-height:1.35;font-weight:600;letter-spacing:-.2px;color:var(--text)}
+.hud-attempt{font-weight:450;color:var(--text-secondary)}
+.hud-card p{margin:8px 0 0;font-size:13px;line-height:1.6;color:var(--text-secondary)}
+.hud-card-actions{display:flex;justify-content:center;gap:8px;margin-top:16px}
+
+/* Floating bar */
+.hud-bar{position:absolute;z-index:3;top:12px;left:50%;transform:translate(-50%,0);
+  width:max-content;max-width:calc(100% - 24px);display:flex;flex-direction:column;align-items:stretch;
+  padding:6px;border-radius:var(--radius-xl,18px);color:var(--text);
+  background:linear-gradient(180deg,var(--hud-glass-a),var(--hud-glass-b));border:1px solid var(--hud-edge);
+  -webkit-backdrop-filter:blur(20px) saturate(1.6);backdrop-filter:blur(20px) saturate(1.6);
+  box-shadow:var(--elev-3,0 16px 40px rgb(0 0 0 / .3)),inset 0 1px 0 color-mix(in srgb,#fff 10%,transparent);
+  transition:opacity .2s ease,transform .28s var(--hud-ease),visibility 0s}
+.hud-bar[data-visible="false"]{opacity:0;transform:translate(-50%,-12px);pointer-events:none}
+.hud-handle{position:absolute;z-index:2;top:6px;left:50%;width:44px;height:6px;margin-left:-22px;border-radius:99px;pointer-events:none;
+  background:var(--hud-glass-a);border:1px solid var(--hud-edge);box-shadow:var(--elev-1,0 2px 6px rgb(0 0 0 / .25));opacity:0;transition:opacity .3s ease}
+.hud-handle[data-shown="true"]{opacity:.9}
+
+/* Status row */
+.hud-status{display:flex;align-items:center;gap:6px;min-width:0;padding:2px 4px 6px 6px;font-size:12px;line-height:1.2;color:var(--text-secondary)}
+.hud-status-fill{flex:1;min-width:8px}
+.hud-title{font-size:13px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:260px;margin-left:2px}
+.hud-state{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border-radius:99px;font-weight:600;white-space:nowrap;
+  background:var(--hud-inset);border:1px solid var(--line);color:var(--text)}
+.hud-state.is-reconnecting{color:var(--warning-text);border-color:var(--warning-line);background:color-mix(in srgb,var(--warning-surface) 80%,transparent)}
+.hud-live-dot{width:8px;height:8px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 22%,transparent);animation:hud-pulse 2.4s ease-in-out infinite}
+.hud-chip{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border-radius:99px;white-space:nowrap;
+  background:var(--hud-inset);border:1px solid var(--line);color:var(--text-secondary);font-size:12px}
+.hud-chip>svg{flex-shrink:0;color:var(--text-muted)}
+.hud-chip.is-control{color:var(--text);border-color:color-mix(in srgb,var(--accent) 55%,var(--line));background:color-mix(in srgb,var(--accent) 16%,var(--hud-inset))}
+.hud-chip.is-control>svg{color:var(--accent-text,var(--accent))}
+.hud-chip.is-ended{color:var(--danger-text);border-color:var(--danger-line);background:color-mix(in srgb,var(--danger-surface) 85%,transparent)}
+.hud-chip.is-ended>svg{color:var(--danger-text)}
+.hud-chip kbd{font:inherit;font-size:12px;font-weight:600;line-height:1;padding:3px 6px;margin-right:-1px;border-radius:5px;color:var(--text);
+  background:var(--surface);border:1px solid var(--line-strong);box-shadow:0 1px 0 var(--line-strong)}
+.hud-dot-sep{color:var(--text-subtle);margin:0 1px}
+
+/* Link-quality meter */
+.hud-meter-wrap{position:static;display:inline-flex} /* tip anchors to .hud-bar so it never covers the toolbar row */
+.hud-meter{display:inline-flex;align-items:center;gap:7px;height:28px;padding:0 11px 0 9px;border-radius:99px;font-size:12px;font-weight:600;white-space:nowrap;
+  background:var(--hud-inset);border:1px solid var(--line);color:var(--text)}
+.hud-meter:hover{background:var(--surface-hover)}
+.hud-bars{display:inline-flex;align-items:flex-end;gap:2px;height:13px}
+.hud-bars>i{display:block;width:4px;border-radius:1.5px;background:color-mix(in srgb,var(--text-muted) 35%,transparent)}
+.hud-bars>i:nth-child(1){height:5px}.hud-bars>i:nth-child(2){height:9px}.hud-bars>i:nth-child(3){height:13px}
+.q-good .hud-bars>i[data-on="true"]{background:var(--accent)}
+.q-fair .hud-bars>i[data-on="true"]{background:var(--warning-text)}
+.q-slow .hud-bars>i[data-on="true"]{background:var(--danger-text)}
+.q-fair{color:var(--warning-text)}.q-slow{color:var(--danger-text)}.q-unknown{color:var(--text-secondary);font-weight:500}
+.hud-tip{position:absolute;top:calc(100% + 10px);left:50%;transform:translate(-50%,-4px);z-index:5;width:300px;display:flex;flex-direction:column;gap:6px;
+  padding:12px 14px;border-radius:var(--radius-md,12px);font-size:12px;line-height:1.35;color:var(--text-secondary);text-align:left;white-space:normal;
+  background:var(--surface-raised);border:1px solid var(--line-strong);box-shadow:var(--elev-3,0 16px 40px rgb(0 0 0 / .3));
+  opacity:0;visibility:hidden;pointer-events:none;transition:opacity .15s ease,transform .2s var(--hud-ease),visibility 0s .15s}
+.hud-meter-wrap:hover .hud-tip,.hud-meter:focus-visible+.hud-tip,.hud-tip[data-open="true"]{opacity:1;visibility:visible;transform:translate(-50%,0);transition-delay:0s}
+.hud-tip-title{font-weight:600;color:var(--text);margin-bottom:2px}
+.hud-tip-row{display:flex;justify-content:space-between;gap:12px}
+.hud-tip-row>b{font-weight:600;color:var(--text);font-variant-numeric:tabular-nums}
+.hud-tip-foot{margin-top:4px;padding-top:8px;border-top:1px solid var(--line);color:var(--text-muted)}
+.hud-tip-scale{display:block;margin-top:3px;white-space:nowrap;color:var(--text-secondary)}
+
+/* Toolbar row: restyles the existing session-toolbar controls for the glass bar. */
+.hud-toolbar{display:flex;align-items:center;flex-wrap:wrap;justify-content:center;gap:4px;padding-top:6px;border-top:1px solid var(--line)}
+.hud-toolbar .toolbar-group{display:flex;align-items:center;gap:2px;color:var(--text-muted)}
+.hud-toolbar .toolbar-group:has(select){gap:6px;height:34px;padding:0 6px 0 11px;border-radius:99px;background:var(--hud-inset);border:1px solid var(--line)}
+.hud-toolbar .toolbar-group:has(.toolbar-button.selected){padding:2px;border-radius:99px;background:var(--hud-inset);border:1px solid var(--line)}
+.hud-toolbar .toolbar-group select{font-size:12px;color:var(--text);max-width:220px;background:none;border:0;cursor:pointer}
+.hud-toolbar .toolbar-group select option{background:var(--surface-raised);color:var(--text)}
+.hud-toolbar .toolbar-button{min-height:34px;padding:0 12px;gap:7px;border-radius:99px;font-size:12px;font-weight:500;color:var(--text-secondary)}
+.hud-toolbar .toolbar-group:has(.toolbar-button.selected) .toolbar-button{min-height:28px;padding:0 11px}
+.hud-toolbar .toolbar-button:hover:not(:disabled){background:var(--surface-hover);color:var(--text)}
+.hud-toolbar .toolbar-button.selected{background:var(--surface-raised);color:var(--text);box-shadow:var(--elev-1,0 1px 3px rgb(0 0 0 / .2)),inset 0 0 0 1px var(--line-strong)}
+.hud-toolbar .toolbar-spacer{flex:0 0 6px}
+.hud-toolbar .toolbar-divider{width:1px;height:22px;margin:0 4px;background:var(--line-strong)}
+.hud-toolbar .button.small{min-height:34px;padding:0 15px;border-radius:99px;font-size:12px}
+.hud-bar :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.hud-toolbar .toolbar-group:has(select:focus-visible){outline:2px solid var(--accent);outline-offset:2px}
+.hud-toolbar .toolbar-group select:focus-visible{outline:0}
+
+.hud-sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+.hud-spin{animation:hud-spin 1s linear infinite}
+
+@keyframes hud-spin{to{transform:rotate(360deg)}}
+@keyframes hud-pulse{0%,100%{box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 22%,transparent)}50%{box-shadow:0 0 0 5px color-mix(in srgb,var(--accent) 8%,transparent)}}
+@keyframes hud-card-in{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:none}}
+
+@media (prefers-reduced-motion:reduce){
+  .hud-stage,.hud-bar,.hud-handle,.hud-tip{transition:none}
+  .hud-bar[data-visible="false"]{transform:translate(-50%,0)}
+  .hud-spin,.hud-live-dot,.hud-card{animation:none}
+}
+@media (prefers-reduced-transparency:reduce){
+  .hud-bar,.hud-card{background:var(--surface-raised);-webkit-backdrop-filter:none;backdrop-filter:none}
+}
+@media (max-width:900px){
+  .hud-title{max-width:150px}
+  .hud-toolbar .toolbar-button>span{display:none}
+}
+.hud-meter-wrap:hover .hud-tip[data-dismissed="true"],.hud-meter-wrap .hud-tip[data-dismissed="true"]{opacity:0;visibility:hidden}
+/* Pop-out screen windows: the HUD wrappers must fill the remaining height so the status bar stays visible. */
+.standalone-viewer .hud{flex:1;min-height:0;display:flex;flex-direction:column}
+.standalone-viewer .hud-stage{flex:1;min-height:0;display:flex;flex-direction:column}
+.standalone-viewer .hud-stage>.remote-viewer{flex:1;min-height:0;height:auto}

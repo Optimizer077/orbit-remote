@@ -1,6 +1,6 @@
 # Continue development on a Mac
 
-Orbit is an evaluation preview. The macOS backend exists in source, but macOS execution, packaging, permissions, and cross-device sessions still need validation on a physical Mac. A Windows `.exe` cannot run natively on macOS; build the Mac application on your Mac.
+Orbit is an evaluation preview. Native Apple silicon execution, DMG installation, both-display capture, keyboard/mouse control, clipboard, and local encrypted-session recovery have been exercised on macOS. See [the Mac validation record](MACOS-VALIDATION.md) for the exact scope. Intel execution and sessions between separate Mac/Windows computers remain unverified. A Windows `.exe` cannot run natively on macOS; build the Mac application on your Mac.
 
 ## 1. Install prerequisites
 
@@ -14,8 +14,8 @@ Use a native terminal session on Apple silicon. Check `uname -m`, `node -p proce
 ## 2. Clone and launch
 
 ```bash
-git clone https://github.com/Optimizer077/orbit-remote-public.git
-cd orbit-remote-public
+git clone https://github.com/Optimizer077/orbit-remote.git
+cd orbit-remote
 bash scripts/start-dev.sh
 ```
 
@@ -53,11 +53,12 @@ If the CLI is elsewhere, put its real directory on `PATH` before launching the d
 
 Keep the Mac signed in with an unlocked desktop and a local recovery route during testing.
 
-1. In **System Settings > Privacy & Security > Screen & System Audio Recording** (called **Screen Recording** on some macOS versions), allow the application macOS identifies for Orbit's screen capture. See [Apple's screen permission instructions](https://support.apple.com/guide/mac-help/control-access-to-screen-and-system-audio-recording-mchld6aa7d23/mac).
-2. In **System Settings > Privacy & Security > Accessibility**, allow the application macOS identifies for Orbit's keyboard/mouse control. See [Apple's Accessibility instructions](https://support.apple.com/guide/mac-help/allow-accessibility-apps-to-access-your-mac-mh43185/mac).
-3. Quit Orbit from its menu-bar menu and relaunch after changing permission settings if requested by macOS. Check capture and input capability in Orbit before enabling remote control.
+1. Open **Orbit Remote > Set Up Mac Permissions…** in the application menu, or the same item in Orbit's menu-bar icon. Choose **Request Screen Recording** or **Request Accessibility**. Requests follow an explicit local action; opening the app does not grant access.
+2. In **System Settings > Privacy & Security > Screen & System Audio Recording** (called **Screen Recording** on some macOS versions), allow the application macOS identifies for Orbit's screen capture. See [Apple's screen permission instructions](https://support.apple.com/guide/mac-help/control-access-to-screen-and-system-audio-recording-mchld6aa7d23/mac).
+3. In **System Settings > Privacy & Security > Accessibility**, allow the application macOS identifies for Orbit's keyboard/mouse control. See [Apple's Accessibility instructions](https://support.apple.com/guide/mac-help/allow-accessibility-apps-to-access-your-mac-mh43185/mac).
+4. Quit Orbit from its menu-bar menu and relaunch after changing permission settings if requested by macOS. Check capture and input capability in Orbit before enabling remote control.
 
-Development capture runs in a `dotnet` child and uses `/usr/sbin/screencapture`; input is produced by that host through CoreGraphics. Permission attribution may therefore differ between a terminal-launched build and a packaged `.app`. Approve only the actual Orbit launch chain you have inspected. Record the requesting app/process, denied states, and successful settings during native testing. The current backend checks permissions but does not provide a complete permission-request wizard. A changed binary, path, signing identity, or launch method may require renewed approval.
+Development capture runs in a `dotnet` child and uses `/usr/sbin/screencapture`; input is produced by that host through CoreGraphics. Permission attribution may therefore differ between a terminal-launched build and a packaged `.app`. Approve only the actual Orbit launch chain you have inspected. The setup dialog reads the host's capabilities, can request approval, and links to the two fixed settings pages; macOS retains control of consent. A changed binary, path, signing identity, or launch method may require renewed approval.
 
 Do not disable macOS security protections or bypass consent to make a test pass. This preview has no macOS locked-screen, login-window, FileVault preboot, or remote-lock implementation. Startup at user login is distinct from access before login. The installed app has a start-at-login option; its actual operation and permissions after login must be tested on the Mac. The development app starts manually.
 
@@ -73,19 +74,38 @@ For a deliberate alternate architecture build on macOS, use `bash scripts/build.
 
 Creating a DMG does not establish a distributable signed release. [Electron's macOS release guidance](https://www.electronjs.org/docs/latest/tutorial/code-signing) requires code signing and notarization for normal distribution. Configure your own signing credentials outside source control, account for the nested native host, and verify the complete installed bundle. This repository does not supply an Apple Developer identity or claim a notarized Mac release.
 
+For a local preview without an Apple Developer identity:
+
+```bash
+ORBIT_PACKAGE_OUTPUT="$HOME/Library/Caches/OrbitRemoteBuilds" \
+  bash scripts/build.sh --package --adhoc
+```
+
+`--adhoc` explicitly signs the bundle with a local identity, disables hardened runtime for that local preview, and skips notarization. It does not produce a Developer ID release or establish Gatekeeper acceptance on another Mac. The default distribution configuration retains hardened runtime and JIT entitlements for Electron and the bundled .NET host.
+
+`ORBIT_PACKAGE_OUTPUT` optionally places generated packages outside the checkout. This is useful when Documents is managed by a File Provider that adds Finder metadata and causes `codesign` to reject generated binaries. Use a local cache output rather than stripping OS security attributes. Copy **Orbit Remote.app** from the mounted DMG into **Applications** or **~/Applications** before launching; end users do not need Node.js or .NET installed.
+
 The same shell scripts support Linux (`linux-x64`/`linux-arm64`); `--package` requests AppImage and Debian outputs. The current Linux host supports local X11 with `systemd-logind`, `ffmpeg` with `x11grab`, `xdotool`, `xrandr`, and `xclip`. Wayland and pre-login control remain separate work.
 
 ## 6. Validate before extending
 
-Run the existing checks from the repository:
+Install the locked desktop dependencies, then run the Mac checks from the repository:
 
 ```bash
-dotnet build src/Orbit.Host/Orbit.Host.csproj --nologo
-dotnet run --project tests/Orbit.Host.Tests/Orbit.Host.Tests.csproj
-cd apps/desktop
-npm ci --no-audit --no-fund
-npm test
-npm run build
+npm --prefix apps/desktop ci --no-audit --no-fund
+bash scripts/check-mac.sh --expect-interactive
 ```
+
+The launcher resolves macOS's temporary-directory alias, runs the native Mac harness and channel checks, then runs the Mac Electron smoke test. It uses an isolated profile and loopback-only pairing. If Screen Recording is denied, it verifies that sessions are refused and reports the denied state; that result is not a successful screen-sharing test.
+
+To exercise the installed app with actual pointer/keyboard and clipboard operations after local OS approval:
+
+```bash
+ORBIT_MAC_TEST_APP="$HOME/Applications/Orbit Remote.app" \
+ORBIT_MAC_TEST_CONTROL=1 \
+  bash scripts/check-mac.sh --expect-interactive
+```
+
+The control check clicks and types only in temporary test windows on the available displays, checks Shift/release behavior, restores the clipboard and cursor, and shuts down its host. It also tests crash recovery and deliberate host-stop enforcement. It does not save desktop images, clipboard data, invitations, or private identities to test artifacts. The Windows smoke test remains separate in `desktop.spec.ts`.
 
 See [`TODO.md`](../TODO.md), [`PLAN.md`](PLAN.md), and [`VALIDATION.md`](VALIDATION.md) for release gates and the current evidence. Prioritize real Mac/Windows pairing in both directions, permission-denied behavior, Retina and negative monitor coordinates, modifier release on disconnect, revocation during an active session, sleep/wake, and Tailscale reconnection. Record exact hardware/OS, architecture, source commit, permission attribution, direct/relay path, and failures. Locked-screen support, persistent services, a native macOS permission helper, low-latency video, signing/notarization, and native secret storage must remain explicit next steps until implemented and verified.

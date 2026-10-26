@@ -6,6 +6,8 @@ namespace Orbit.Host;
 
 public sealed class HostState
 {
+    public const int MaximumSessions = 8;
+    public const int MaximumSessionsPerDevice = 2;
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { WriteIndented = true };
     private readonly object gate = new();
     private readonly string directory;
@@ -84,11 +86,14 @@ public sealed class HostState
             return peer;
         }
     }
-    public bool Revoke(string id)
+    public bool Revoke(string id) => Revoke(id, out _);
+    public bool Revoke(string id, out bool revokedControllingSession)
     {
         lock (gate)
         {
+            revokedControllingSession = false;
             var index = state.Devices.FindIndex(d => d.Id == id && d.RevokedAt is null); if (index < 0) return false;
+            revokedControllingSession = sessions.Values.Any(s => s.DeviceId == id && s.Permissions.Control);
             state.Devices[index] = state.Devices[index] with { RevokedAt = clock.GetUtcNow() };
             foreach (var session in sessions.Values.Where(s => s.DeviceId == id).ToArray()) sessions.Remove(session.Id);
             Save(); AddAudit("device.revoked", id, "Device access revoked locally; its sessions ended."); return true;
@@ -102,7 +107,9 @@ public sealed class HostState
             device = state.Devices.FirstOrDefault(d => d.Fingerprint == device.Fingerprint && d.RevokedAt is null) ?? throw new UnauthorizedAccessException();
             if (expectedResumeEpoch is not null && !Security.TokenEquals(expectedResumeEpoch, device.ResumeEpoch)) throw new SessionEndedException();
             var permissions = viewOnly ? device.Permissions with { Control = false, Clipboard = false, Files = false, Power = false } : device.Permissions;
-            if (sessions.Count >= 8) throw new InvalidOperationException("The host has reached its session limit.");
+            if (sessions.Values.Count(session => session.DeviceId == device.Id) >= MaximumSessionsPerDevice)
+                throw new InvalidOperationException($"This device has reached its limit of {MaximumSessionsPerDevice} concurrent sessions. Close one of its sessions before connecting again.");
+            if (sessions.Count >= MaximumSessions) throw new InvalidOperationException("The host has reached its session limit.");
             if (permissions.Control && sessions.Values.Any(s => s.Permissions.Control)) throw new InvalidOperationException("Another control session is active. End it before starting a new control session.");
             var now = clock.GetUtcNow();
             var session = new RemoteSession(Guid.NewGuid().ToString("N"), device.Id, device.Name, monitorId, permissions, now, now.AddHours(2), now, ResumeEpoch: device.ResumeEpoch);
@@ -118,11 +125,14 @@ public sealed class HostState
             session = session with { LastActivityAt = clock.GetUtcNow() }; sessions[id] = session; return session;
         }
     }
-    public bool EndSession(string id, string? deviceId = null)
+    public bool EndSession(string id, string? deviceId = null) => EndSession(id, deviceId, out _);
+    public bool EndSession(string id, string? deviceId, out bool endedControllingSession)
     {
         lock (gate)
         {
+            endedControllingSession = false;
             if (!sessions.TryGetValue(id, out var session) || deviceId is not null && session.DeviceId != deviceId) return false;
+            endedControllingSession = session.Permissions.Control;
             if (deviceId is null)
             {
                 var index = state.Devices.FindIndex(d => d.Id == session.DeviceId);

@@ -20,7 +20,7 @@ test('real desktop host: onboarding, pairing, native frames, settings and revoca
     await application.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].showInactive());
     const errors: string[] = [];
     page.on('pageerror', error => errors.push(error.message));
-    await expect(page.getByRole('heading', { name: 'Your world. Within reach.' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Add a device', exact: true })).toBeVisible();
     await expect(page.getByText('Local test mode', { exact: true })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Meet your other computer.' })).toBeVisible();
     const invoke = <T,>(action: string, payload?: unknown) => page.evaluate(
@@ -63,11 +63,11 @@ test('real desktop host: onboarding, pairing, native frames, settings and revoca
     expect(await about.locator('.flow-arrow > i').first().evaluate(element => getComputedStyle(element).animationName)).toBe('none');
     expect(await about.locator('.flow-arrow > i').first().evaluate(element => getComputedStyle(element).display)).toBe('none');
     await page.getByRole('button', { name: 'Overview', exact: true }).click();
-    expect(await page.locator('.orbit-satellite').first().evaluate(element => getComputedStyle(element).animationName)).toBe('none');
+    expect(await page.locator('.ov-rise').first().evaluate(element => getComputedStyle(element).animationName)).toBe('none');
     await page.emulateMedia({ reducedMotion: 'no-preference' });
     await page.getByRole('button', { name: 'Settings', exact: true }).click();
     expect(await about.locator('.flow-arrow > i').first().evaluate(element => getComputedStyle(element).animationName)).toBe('diagram-flow');
-    for (const [name, value] of [['Midnight', 'midnight'], ['Paper', 'paper'], ['Orbit', 'orbit']]) {
+    for (const [name, value] of [['Midnight', 'midnight'], ['Paper', 'paper'], ['Graphite', 'graphite'], ['Daylight', 'daylight']]) {
       const choice = page.getByRole('button', { name: 'Use ' + name + ' theme', exact: true });
       await choice.click();
       await expect(choice).toHaveAttribute('aria-pressed', 'true');
@@ -80,10 +80,10 @@ test('real desktop host: onboarding, pairing, native frames, settings and revoca
     await page.getByRole('button', { name: 'Settings', exact: true }).click();
     await page.emulateMedia({ colorScheme: 'light' });
     await page.getByRole('switch', { name: 'Follow system appearance', exact: true }).click();
-    await expect(page.locator('html')).toHaveAttribute('data-theme', 'paper');
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'daylight');
     await page.emulateMedia({ colorScheme: 'dark' });
-    await expect(page.locator('html')).toHaveAttribute('data-theme', 'midnight');
-    await page.getByRole('button', { name: 'Use Orbit theme', exact: true }).click();
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'graphite');
+    await page.getByRole('button', { name: 'Use Daylight theme', exact: true }).click();
     await expect(page.getByRole('switch', { name: 'File transfer', exact: true })).toBeEnabled();
     await expect(page.getByRole('switch', { name: 'Lock & restart', exact: true })).toBeEnabled();
     if (packaged) await expect(page.getByRole('switch', { name: 'Start Orbit at sign-in', exact: true })).toBeEnabled();
@@ -98,7 +98,7 @@ test('real desktop host: onboarding, pairing, native frames, settings and revoca
     await fs.mkdir(path.resolve('../../artifacts'), { recursive: true });
     await page.evaluate(() => window.scrollTo(0, 0));
     await page.screenshot({ path: path.resolve('../../artifacts/orbit-overview.png'), fullPage: true, animations: 'disabled' });
-    for (const [name, value] of [['Midnight', 'midnight'], ['Paper', 'paper']]) {
+    for (const [name, value] of [['Graphite', 'graphite'], ['Midnight', 'midnight'], ['Paper', 'paper']]) {
       await page.getByRole('button', { name: 'Settings', exact: true }).click();
       await page.getByRole('button', { name: 'Use ' + name + ' theme', exact: true }).click();
       await page.getByRole('button', { name: 'Overview', exact: true }).click();
@@ -106,7 +106,7 @@ test('real desktop host: onboarding, pairing, native frames, settings and revoca
       await page.screenshot({ path: path.resolve('../../artifacts/orbit-' + value + '.png'), fullPage: true, animations: 'disabled' });
     }
     await page.getByRole('button', { name: 'Settings', exact: true }).click();
-    await page.getByRole('button', { name: 'Use Orbit theme', exact: true }).click();
+    await page.getByRole('button', { name: 'Use Daylight theme', exact: true }).click();
     await page.getByRole('button', { name: 'Overview', exact: true }).click();
     await page.getByRole('button', { name: 'Add a device', exact: true }).click();
     await expect(page.getByRole('switch', { name: 'Mouse & keyboard', exact: true })).toHaveAttribute('aria-checked', 'false');

@@ -98,10 +98,11 @@ public static class Security
 
 public sealed class HostIdentity : IDisposable
 {
-    // Windows Schannel cannot serve TLS with ephemeral imported keys. UserKeySet
-    // imports into the current user's protected key container and Dispose removes
-    // the temporary import; the durable identity remains DPAPI protected below.
-    private static X509KeyStorageFlags KeyFlags => X509KeyStorageFlags.Exportable | (OperatingSystem.IsWindows() ? X509KeyStorageFlags.UserKeySet : X509KeyStorageFlags.EphemeralKeySet);
+    // Windows Schannel needs a key container, and macOS rejects EphemeralKeySet.
+    // Use a temporary user import on those platforms (no PersistKeySet); disposal
+    // releases it. The durable profile identity remains protected separately.
+    private static X509KeyStorageFlags KeyFlags => X509KeyStorageFlags.Exportable |
+        (OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() ? X509KeyStorageFlags.UserKeySet : X509KeyStorageFlags.EphemeralKeySet);
     public X509Certificate2 Certificate { get; }
     public string Fingerprint => Security.Fingerprint(Certificate);
     public HostIdentity(string directory, string hostId, IPAddress? address)

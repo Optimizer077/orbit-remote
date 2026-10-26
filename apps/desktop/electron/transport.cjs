@@ -128,6 +128,8 @@ class PinnedAgent extends https.Agent {
 
 function request(options) {
   const { url, method = 'GET', body, headers = {}, agent, maxBytes = MAX_RESPONSE, timeout = 15000 } = options;
+  // 304 is only a success for a request that actually asked a conditional question.
+  const conditional = Object.keys(headers).some(name => name.toLowerCase() === 'if-none-match');
   return new Promise((resolve, reject) => {
     const data = body === undefined ? undefined : Buffer.isBuffer(body) ? body : Buffer.from(JSON.stringify(body));
     const transport = url.protocol === 'https:' ? https : http;
@@ -146,6 +148,11 @@ function request(options) {
       response.on('error', reject);
       response.on('end', () => {
         const buffer = Buffer.concat(chunks);
+        if (response.statusCode === 304) {
+          if (!conditional) return reject(Object.assign(new Error('Device sent an unsolicited 304 Not Modified response.'), { status: 304 }));
+          // Not Modified never carries a body; any bytes are discarded rather than trusted.
+          return resolve({ json: undefined, buffer: Buffer.alloc(0), headers: response.headers, status: 304, link });
+        }
         let json;
         if (String(response.headers['content-type']).includes('application/json')) {
           try { json = JSON.parse(buffer.toString('utf8')); } catch { return reject(new Error('Device returned invalid JSON.')); }

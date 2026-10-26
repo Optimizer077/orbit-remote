@@ -130,3 +130,41 @@ test('absolute deadline stops a slow response even when bytes keep arriving', as
   const port = await listen(server, t);
   await assert.rejects(request({ url: new URL('http://127.0.0.1:' + port), timeout: 150 }), /deadline/);
 });
+
+test('a conditional request over pinned TLS resolves 304 as an empty successful result', async t => {
+  const tag = '"orbit-frame-v1-' + 'AB'.repeat(32) + '"';
+  const seen = [];
+  const server = https.createServer({ cert: certificatePem, key: privateKeyPem }, (req, res) => {
+    seen.push(req.headers['if-none-match']);
+    if (req.headers['if-none-match'] === tag) { res.writeHead(304, { etag: tag, 'x-orbit-width': '1920' }); res.end(); return; }
+    res.writeHead(200, { 'content-type': 'image/png', etag: tag }); res.end(Buffer.from('png-bytes'));
+  });
+  const port = await listen(server, t);
+  const device = { address: 'https://127.0.0.1:' + port, fingerprint };
+  const fresh = await remoteRequest(device, identity, '/api/sessions/s/frame', {}, true);
+  assert.equal(fresh.status, 200);
+  assert.equal(fresh.buffer.toString(), 'png-bytes');
+  const unchanged = await remoteRequest(device, identity, '/api/sessions/s/frame', { headers: { 'If-None-Match': fresh.headers.etag } }, true);
+  assert.equal(unchanged.status, 304);
+  assert.equal(unchanged.buffer.length, 0);
+  assert.equal(unchanged.headers.etag, tag);
+  assert.equal(unchanged.headers['x-orbit-width'], '1920');
+  assert.equal(unchanged.link.protocol, 'TLS 1.3', 'a 304 still reports the verified link');
+  assert.deepEqual(seen, [undefined, tag]);
+});
+
+test('an unsolicited 304 is rejected rather than treated as an empty frame', async t => {
+  const server = https.createServer({ cert: certificatePem, key: privateKeyPem }, (_req, res) => { res.writeHead(304); res.end(); });
+  const port = await listen(server, t);
+  await assert.rejects(remoteRequest({ address: 'https://127.0.0.1:' + port, fingerprint }, identity, '/api/sessions/s/frame', {}, true),
+    error => error.status === 304 && /unsolicited/.test(error.message));
+});
+
+test('conditional requests keep the pin check: a mismatched certificate receives no validator', async t => {
+  let requests = 0;
+  const server = https.createServer({ cert: certificatePem, key: privateKeyPem }, (_req, res) => { requests++; res.writeHead(304); res.end(); });
+  const port = await listen(server, t);
+  await assert.rejects(remoteRequest({ address: 'https://127.0.0.1:' + port, fingerprint: '00'.repeat(32) }, identity,
+    '/api/sessions/s/frame', { headers: { 'if-none-match': '"x"' } }, true), /identity changed/);
+  assert.equal(requests, 0);
+});

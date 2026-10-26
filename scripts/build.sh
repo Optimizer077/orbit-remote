@@ -3,11 +3,12 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: bash scripts/build.sh [--package] [--skip-install] [--runtime RID]
+Usage: bash scripts/build.sh [--package] [--skip-install] [--runtime RID] [--adhoc]
 
 Publish a self-contained host and build the desktop on macOS/Linux.
   --package       Also create a macOS DMG or Linux AppImage and Debian package.
   --skip-install  Reuse existing apps/desktop/node_modules (run npm ci first).
+  --adhoc         macOS local preview: ad-hoc signing, no notarization.
   --runtime RID   Same-OS osx-arm64/osx-x64 or linux-arm64/linux-x64 target.
                   Defaults to the architecture reported by uname -m.
 
@@ -17,11 +18,13 @@ USAGE
 
 package=false
 skip_install=false
+adhoc=false
 runtime=""
 while (($#)); do
   case "$1" in
     --package) package=true; shift ;;
     --skip-install) skip_install=true; shift ;;
+    --adhoc) adhoc=true; shift ;;
     --runtime)
       if (($# < 2)) || [[ -z "$2" || "$2" == --* ]]; then
         printf '%s\n' '--runtime requires a runtime identifier.' >&2; exit 2
@@ -37,6 +40,12 @@ case "$(uname -s)" in
   Linux) runtime_os=linux; builder_os=--linux ;;
   *) printf 'Use scripts/build.ps1 on Windows.\n' >&2; exit 1 ;;
 esac
+if "$adhoc"; then
+  if [[ "$runtime_os" != osx ]]; then
+    printf '%s\n' '--adhoc is available only on macOS.' >&2; exit 2
+  fi
+  export ORBIT_MAC_ADHOC_SIGN=1
+fi
 case "$(uname -m)" in
   arm64|aarch64) native_arch=arm64 ;;
   x86_64|amd64) native_arch=x64 ;;

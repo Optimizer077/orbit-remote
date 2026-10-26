@@ -1,0 +1,92 @@
+/* "This computer is being viewed" banner (D2). Theme values come only from U1's variables. */
+.viewed-banner{
+  --vb-tone:var(--accent);
+  --vb-tone-text:var(--accent-text);
+  --vb-bg:color-mix(in srgb,var(--accent) 9%,var(--surface));
+  --vb-edge:color-mix(in srgb,var(--accent) 32%,var(--line));
+  position:sticky;top:0;z-index:30;
+  display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:14px;
+  padding:11px 24px 11px 21px;
+  background:var(--vb-bg);color:var(--text);
+  border-bottom:1px solid var(--vb-edge);
+  box-shadow:inset 3px 0 0 var(--vb-tone),var(--elev-1,0 1px 2px rgb(0 0 0 / .08));
+  animation:viewed-in var(--dur-base,.22s) var(--ease-out,ease-out) both;
+}
+.viewed-banner.is-controlling{
+  --vb-tone:var(--warning-text);
+  --vb-tone-text:var(--warning-text);
+  --vb-bg:var(--warning-surface);
+  --vb-edge:var(--warning-line);
+}
+@keyframes viewed-in{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
+
+.viewed-icon{display:grid;place-items:center;width:34px;height:34px;border-radius:50%;
+  color:var(--vb-tone-text);background:color-mix(in srgb,var(--vb-tone) 14%,var(--surface));
+  border:1px solid color-mix(in srgb,var(--vb-tone) 34%,transparent)}
+.is-controlling .viewed-icon{color:var(--surface);background:var(--vb-tone);border-color:var(--vb-tone)}
+
+.viewed-copy{min-width:0}
+.viewed-title-row{display:flex;align-items:center;gap:10px;min-width:0}
+.viewed-badge{flex:none;font-size:var(--fs-label,12px);font-weight:650;letter-spacing:.04em;text-transform:uppercase;line-height:1;
+  padding:4px 7px;border-radius:999px;color:var(--vb-tone-text);border:1px solid color-mix(in srgb,var(--vb-tone) 45%,transparent);
+  background:color-mix(in srgb,var(--vb-tone) 10%,transparent)}
+.is-controlling .viewed-badge{color:var(--surface);background:var(--vb-tone);border-color:var(--vb-tone)}
+.viewed-title{font-size:var(--fs-body,14px);font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.viewed-detail{margin:3px 0 0;font-size:var(--fs-body-sm,13px);line-height:1.45;color:var(--text-secondary);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+.viewed-timer{flex:none;display:inline-flex;align-items:center;gap:6px;font-size:var(--fs-meta,12px);font-weight:600;
+  color:var(--text-secondary);font-variant-numeric:tabular-nums;padding:3px 8px 3px 7px;border-radius:999px;
+  background:color-mix(in srgb,var(--surface) 70%,transparent);border:1px solid var(--line)}
+.viewed-live-dot{width:7px;height:7px;border-radius:50%;background:var(--vb-tone);position:relative}
+.viewed-live-dot::after{content:"";position:absolute;inset:0;border-radius:50%;background:var(--vb-tone);
+  animation:viewed-pulse 2.4s var(--ease-out,ease-out) infinite}
+@keyframes viewed-pulse{0%{transform:scale(1);opacity:.55}70%,100%{transform:scale(2.6);opacity:0}}
+
+.viewed-actions{display:flex;align-items:center;gap:8px}
+.viewed-btn{display:inline-flex;align-items:center;gap:7px;min-height:32px;padding:6px 12px;border-radius:var(--radius-sm,6px);
+  font-size:var(--fs-body-sm,13px);font-weight:600;line-height:1.2;white-space:nowrap;border:1px solid transparent;
+  transition:background-color var(--dur-fast,.14s) ease,border-color var(--dur-fast,.14s) ease,color var(--dur-fast,.14s) ease}
+.viewed-btn:focus-visible{outline:2px solid var(--focus-color,var(--accent));outline-offset:2px}
+.viewed-btn-quiet{background:var(--surface);color:var(--text);border-color:var(--line-strong)}
+.viewed-btn-quiet:hover:not(:disabled){background:var(--surface-hover)}
+.viewed-btn-end{background:var(--surface);color:var(--danger-text);border-color:var(--danger-line)}
+.viewed-btn-end:hover:not(:disabled){background:var(--danger-surface)}
+.is-controlling .viewed-actions .viewed-btn-end{background:var(--danger);color:var(--danger-ink);border-color:var(--danger)}
+.is-controlling .viewed-actions .viewed-btn-end:hover:not(:disabled){background:var(--danger-hover);border-color:var(--danger-hover)}
+.viewed-btn:disabled{opacity:.72;cursor:progress}
+.viewed-spin{animation:viewed-spin 1s linear infinite}
+@keyframes viewed-spin{to{transform:rotate(360deg)}}
+.viewed-btn.small{min-height:28px;padding:4px 10px}
+.viewed-count{display:inline-grid;place-items:center;min-width:20px;height:20px;padding:0 6px;border-radius:999px;font-size:var(--fs-label,12px);
+  background:var(--surface-inset,var(--surface-hover));border:1px solid var(--line);font-variant-numeric:tabular-nums}
+.viewed-chevron{transition:transform var(--dur-fast,.14s) ease;color:var(--text-muted)}
+[aria-expanded="true"]>.viewed-chevron{transform:rotate(180deg)}
+
+.viewed-menu{position:absolute;top:calc(100% + 6px);right:24px;width:min(360px,calc(100vw - 48px));z-index:31;
+  background:var(--surface);color:var(--text);border:1px solid var(--line-strong);border-radius:var(--radius-lg,14px);
+  box-shadow:var(--elev-3,0 14px 34px rgb(0 0 0 / .22));padding:6px;
+  animation:viewed-menu-in var(--dur-fast,.14s) var(--ease-out,ease-out) both}
+@keyframes viewed-menu-in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+.viewed-menu ul{list-style:none;margin:0;padding:0}
+.viewed-menu li{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:11px;padding:8px 8px 8px 10px;border-radius:var(--radius-md,10px)}
+.viewed-menu li+li{border-top:1px solid var(--line)}
+.viewed-menu li:hover{background:var(--surface-raised)}
+.viewed-row-icon{display:grid;place-items:center;width:28px;height:28px;border-radius:50%;color:var(--accent-text);
+  background:color-mix(in srgb,var(--accent) 12%,var(--surface))}
+.viewed-menu li.is-controlling .viewed-row-icon{color:var(--warning-text);background:var(--warning-surface);border:1px solid var(--warning-line)}
+.viewed-row-copy{display:flex;flex-direction:column;min-width:0}
+.viewed-row-name{font-size:var(--fs-body-sm,13px);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.viewed-row-meta{font-size:var(--fs-meta,12px);color:var(--text-muted)}
+.viewed-menu li.is-controlling .viewed-row-meta{color:var(--warning-text);font-weight:600}
+.viewed-row-time{font-variant-numeric:tabular-nums}
+
+.viewed-sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+
+@media (max-width:900px){.viewed-detail{display:none}}
+@media (prefers-reduced-motion:reduce){
+  .viewed-banner,.viewed-menu{animation:none}
+  .viewed-live-dot::after{animation:none;opacity:0}
+  .viewed-spin{animation:none}
+  .viewed-btn,.viewed-chevron{transition:none}
+}

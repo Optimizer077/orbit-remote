@@ -8,13 +8,13 @@
   <p>View a screen. Take control with permission. Keep every paired device accountable.</p>
   <p>
     <a href="docs/VALIDATION.md"><img src="https://img.shields.io/badge/status-development_preview-d9c38b?style=flat-square" alt="Status: development preview"></a>
-    <a href="https://github.com/Optimizer077/orbit-remote-public/releases/tag/v0.1.0-preview.2"><img src="https://img.shields.io/badge/download-Windows_x64-b2e6c5?style=flat-square" alt="Download: Windows x64 preview"></a>
+    <a href="https://github.com/Optimizer077/orbit-remote/releases/tag/v0.1.0-preview.3"><img src="https://img.shields.io/badge/download-Windows_x64-b2e6c5?style=flat-square" alt="Download: Windows x64 preview"></a>
     <a href="docs/ARCHITECTURE.md"><img src="https://img.shields.io/badge/network-Tailscale-aecaff?style=flat-square" alt="Network: Tailscale"></a>
     <a href="docs/ENCRYPTION.md"><img src="https://img.shields.io/badge/encryption-WireGuard_%2B_mutual_TLS-b2e6c5?style=flat-square" alt="Encryption: WireGuard plus mutual TLS, two layers"></a>
-    <a href="docs/MACOS.md"><img src="https://img.shields.io/badge/macOS-native_validation_needed-d9c38b?style=flat-square" alt="macOS: native validation needed"></a>
+    <a href="docs/MACOS.md"><img src="https://img.shields.io/badge/macOS-local_adapter_evidence-d9c38b?style=flat-square" alt="macOS: local adapter evidence; UI v2 and cross-device validation pending"></a>
   </p>
   <p>
-    <a href="https://github.com/Optimizer077/orbit-remote-public/releases/tag/v0.1.0-preview.2"><strong>Download Windows</strong></a> ·
+    <a href="https://github.com/Optimizer077/orbit-remote/releases/tag/v0.1.0-preview.3"><strong>Download Windows</strong></a> ·
     <a href="docs/MACOS.md">Continue on a Mac</a> ·
     <a href="docs/ARCHITECTURE.md">How it works</a> ·
     <a href="TODO.md">Roadmap</a> ·
@@ -31,7 +31,7 @@
   </picture>
 </p>
 
-> **Public development preview, with explicit limits.** Windows has local runtime evidence. macOS and Linux need native device validation. Downloads are unsigned; unattended access before login and production security are not established.
+> **Public development preview, with explicit limits.** Windows has local runtime evidence. Apple silicon Mac adapters have local device evidence; UI v2, cross-device sessions, Intel Macs, and Linux still need validation. Downloads are unsigned; unattended access before login and production security are not established.
 
 Orbit Remote connects **your own** Windows, macOS, and Linux computers over your private [Tailscale](https://tailscale.com) network. Every installation is both a viewer and a host. Access comes only from an invitation you create, a certificate pinned at pairing, and the permissions the host's owner grants. Orbit runs no server or account, and it never changes your startup, firewall, or Tailscale policy on its own.
 
@@ -84,6 +84,19 @@ Orbit is for reaching your own computers, or ones whose owner explicitly invited
 5. **Screen updates.** The host captures the chosen monitor and sends it over the double-encrypted link. The viewer shows it with the measured encryption, for example `TLS 1.3 · AES-256-GCM · X25519`.
 6. **Input needs two yeses.** The owner must have granted control, and you must choose **Take control**. Input is bounded and coalesced, and held keys are released if the viewer disappears. **Esc** gives control back.
 7. **Ending is final.** Disconnect, **Disconnect all**, or a host stop ends the session with `410`, and the viewer never silently reconnects. Revoking the device (`401`) removes its access.
+
+### Architecture, component by component
+
+<p align="center">
+  <picture>
+    <source media="(max-width: 767px) and (prefers-color-scheme: dark)" srcset="docs/assets/diagrams/architecture-narrow.svg">
+    <source media="(max-width: 767px)" srcset="docs/assets/diagrams/architecture-narrow-light.svg">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/diagrams/architecture.svg">
+    <img src="docs/assets/diagrams/architecture-light.svg" width="1000" alt="Orbit Remote architecture: the viewer computer's Electron app (renderer, preload IPC bridge, main process with transport and controller) sends pinned mutual-TLS requests inside a Tailscale WireGuard tunnel to the host computer's .NET Orbit host, which passes five gates (link policy, Tailscale source check, certificate pin, grants, session) before frame, input, clipboard, file, and power services drive the existing desktop through platform adapters.">
+  </picture>
+</p>
+
+Every real component in one picture: the Electron app's sandboxed renderer, preload bridge, and main process (`transport.cjs` checks the pin and TLS policy before any byte; `controller.cjs` runs pairing, sessions, frames, and input), the two encryption layers, and the host's five gates, services, stores, and OS adapters. See [the architecture document](docs/ARCHITECTURE.md) for trust boundaries and sequences.
 
 ### What runs on each computer
 
@@ -182,7 +195,7 @@ Read [SECURITY.md](SECURITY.md) before deployment. Report security concerns priv
 
 ### Download for Windows
 
-Get the [preview release](https://github.com/Optimizer077/orbit-remote-public/releases/tag/v0.1.0-preview.2):
+Get the [preview release](https://github.com/Optimizer077/orbit-remote/releases/tag/v0.1.0-preview.3):
 
 | Download | Use it when |
 |---|---|
@@ -216,8 +229,8 @@ Revoke an incoming device or forget an outgoing one at any time. The tray menu o
 Install Git, Node.js 24 LTS, the .NET 10 SDK matching `global.json`, and Tailscale. Then:
 
 ```bash
-git clone https://github.com/Optimizer077/orbit-remote-public.git
-cd orbit-remote-public
+git clone https://github.com/Optimizer077/orbit-remote.git
+cd orbit-remote
 bash scripts/start-dev.sh          # development run
 bash scripts/build.sh --package    # native package (DMG on macOS)
 ```
@@ -228,37 +241,39 @@ The script detects Apple silicon or Intel and builds a matching host and package
 
 | Area | What you get today |
 |---|---|
-| Workspace | Overview, Devices, Connections, Activity, and Settings, all showing real host data. |
+| Workspace | Overview, Devices, Connections, Activity, and Settings, all showing real host data, plus a **Ctrl/⌘ K command palette** to jump anywhere, connect, or switch themes. |
 | Trust | Five-minute single-use invitations, pinned certificates, mutual TLS identities, and comparable security codes. |
 | Encryption | WireGuard + mutual TLS 1.3 (or 1.2 ECDHE + AEAD). Weaker links are refused, and the negotiated encryption is shown live. |
 | Permissions | Separate view, control, clipboard, files, and power grants, enforced on the host. |
-| Viewing | Real monitors, display selection, fit and 1:1 modes, and separate windows for existing host displays. |
+| Viewing | Real monitors, display selection, fit and 1:1 modes, separate windows for existing host displays, and a floating session bar with a **measured link-quality meter** and a Reconnecting / Ended overlay. |
 | Input | Native keyboard and mouse, explicit **Take control**, bounded queues, and automatic release of held keys. |
 | Sharing | Many viewers, one controller, revocation, and **Disconnect all**. A host-ended session is never auto-resumed. |
 | Clipboard & files | Explicit text clipboard; one chosen transfer folder, no overwrite, 16 MiB per transfer. |
 | Power | Optional lock and restart, gated by host policy and the device's grant. |
 | Reliability | Host supervision, owner-exit shutdown, and renewal that rechecks identity and permissions. |
 
-Screen delivery currently polls compressed PNG frames. Weak-network support (skipping unchanged frames, adaptive quality, reconnect handling) is planned. There is no verified FPS benchmark yet, and audio is not implemented.
+Screen delivery polls PNG frames. Windows hosts can skip retransmitting unchanged images, and the viewer reuses its cached frame. Optional lower-resolution frames reduce detail and transferred bytes; capture and PNG encoding still run. There is no verified FPS benchmark yet, and audio is not implemented.
 
 ## Themes
 
-Choose a theme in **Settings**, or let Orbit follow your system's light or dark mode.
+Pick a theme in **Settings** or with the command palette (**Ctrl/⌘ K**). By default Orbit follows your system: **Daylight** in light mode, **Graphite** in dark mode.
 
-| Orbit | Midnight | Paper |
-|:---:|:---:|:---:|
-| <a href="docs/assets/overview.png"><img src="docs/assets/overview.png" width="280" alt="Orbit theme"></a> | <a href="docs/assets/midnight.png"><img src="docs/assets/midnight.png" width="280" alt="Midnight theme"></a> | <a href="docs/assets/paper.png"><img src="docs/assets/paper.png" width="280" alt="Paper theme"></a> |
+| Daylight | Graphite |
+|:---:|:---:|
+| <a href="docs/assets/overview.png"><img src="docs/assets/overview.png" width="440" alt="Daylight theme: bright, crisp surfaces with a teal accent"></a> | <a href="docs/assets/graphite.png"><img src="docs/assets/graphite.png" width="440" alt="Graphite theme: neutral dark greys with a vivid teal accent"></a> |
+| **Midnight** | **Paper** |
+| <a href="docs/assets/midnight.png"><img src="docs/assets/midnight.png" width="440" alt="Midnight theme: deep navy with blue accents"></a> | <a href="docs/assets/paper.png"><img src="docs/assets/paper.png" width="440" alt="Paper theme: warm light paper tones"></a> |
 
-The [brand guide](docs/BRAND.md) covers the logo, icons, palette, type, and motion.
+Every theme meets WCAG AA text contrast, uses no text smaller than 12 px, and respects reduced motion. The [brand guide](docs/BRAND.md) covers the logo, icons, palette, type, and motion.
 
 ## Platform support
 
 | Capability | Windows | macOS | Linux |
 |---|---|---|---|
-| Desktop GUI | Exercised locally | Needs native build/test | Needs native build/test |
-| Unlocked capture | Native GDI, exercised | Native helper, permission required | X11 + ffmpeg |
-| Input | SendInput adapter | CoreGraphics + Accessibility | X11 + xdotool |
-| Text clipboard | Win32 | pbcopy/pbpaste | X11 + xclip |
+| Desktop GUI | Exercised locally | Exercised on Apple silicon ([Mac record](docs/MACOS-VALIDATION.md)) | Needs native build/test |
+| Unlocked capture | Native GDI, exercised | Native helper, exercised with Screen Recording consent (Retina + external display) | X11 + ffmpeg |
+| Input | SendInput adapter | CoreGraphics + Accessibility, exercised | X11 + xdotool |
+| Text clipboard | Win32 | pbcopy/pbpaste, exercised | X11 + xclip |
 | Locked/sign-in/UAC screen | **Unsupported** | **Unsupported** | **Unsupported** |
 | Startup at user sign-in | Installed build option | Packaged option, needs validation | Deployment work remains |
 | Boot before user login | **Not implemented** | **Not implemented** | **Not implemented** |
@@ -269,8 +284,10 @@ The [brand guide](docs/BRAND.md) covers the logo, icons, palette, type, and moti
 | Status | What that means today |
 |---|---|
 | **Exercised locally** | Windows capture, certificate-authenticated loopback sessions, pairing and revocation, link policy, themes, and packaged-app recovery. See the [validation record](docs/VALIDATION.md). |
-| **Built; needs device validation** | macOS and Linux adapters and build scripts; physical cross-device sessions; native input and privacy permissions. |
+| **Native evidence and remaining validation** | Apple silicon Mac adapters were exercised locally on the checkpoint in the [Mac record](docs/MACOS-VALIDATION.md). UI v2 on Mac, Intel, Linux, and physical cross-device sessions remain pending. |
 | **Planned / unsupported** | Locked and sign-in screens, access before login, Wayland, virtual monitors, hardware video, audio, and signed updates. See [next steps](TODO.md). |
+
+Completed checks and their limits are recorded in the [validation record](docs/VALIDATION.md).
 
 ## Develop
 
@@ -288,7 +305,7 @@ dotnet run --project tests/Orbit.Host.Tests/Orbit.Host.Tests.csproj
 cd apps/desktop && npm test && npm run build
 ```
 
-For local-only testing, use `start-dev.ps1 -LoopbackTest` or `start-dev.sh --loopback-test`. This binds remote TLS to loopback and labels the UI **Local test mode**.
+For local-only testing, use `start-dev.ps1 -LoopbackTest` or `start-dev.sh --loopback-test`. This binds remote TLS to loopback and labels the UI **Local test mode**. Run the Windows checks above; on a Mac, use `bash scripts/check-mac.sh` for the native and desktop checks.
 
 <details>
 <summary>Repository map</summary>
@@ -317,7 +334,7 @@ Packaging checks each executable's real OS and architecture; build native packag
 | [Security model](SECURITY.md) | [How your connection is encrypted](docs/ENCRYPTION.md) | [Contribution guide](CONTRIBUTING.md) |
 | [Validation record](docs/VALIDATION.md) | [Pairing and API protocol](docs/PROTOCOL.md) | [Release plan](docs/PLAN.md) |
 | [Changelog](CHANGELOG.md) | [Performance and measurement](docs/PERFORMANCE.md) | [Brand guide](docs/BRAND.md) |
-| | [Extra screens and virtual displays](docs/VIRTUAL_DISPLAYS.md) | |
+| | [Extra screens and virtual displays](docs/VIRTUAL_DISPLAYS.md) |  |
 
 ## Contributing
 
@@ -325,5 +342,6 @@ Start with a small item from [TODO.md](TODO.md) and follow [CONTRIBUTING.md](CON
 
 Each computer generates its own identity. **Never copy keys or application-data folders between computers, or commit them.**
 
+This repository contains product source snapshots and tested preview downloads. See [the changelog](CHANGELOG.md) for released changes and [the roadmap](TODO.md) for remaining work.
 
 No software license is declared yet; license selection is tracked in the checklist. This preview is not a production security certification.

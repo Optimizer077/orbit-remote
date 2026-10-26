@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, dialog, session, clipboard, shell, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, dialog, session, clipboard, shell, screen, systemPreferences, desktopCapturer } = require('electron');
 const { pathToFileURL } = require('node:url');
 const path = require('node:path');
 const fs = require('node:fs');
@@ -7,8 +7,9 @@ const crypto = require('node:crypto');
 const { spawn, execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const { OrbitController } = require('./controller.cjs');
+const { createMacPermissionSetup } = require('./mac-permissions.cjs');
 
-let mainWindow, tray, hostProcess, controller;
+let mainWindow, tray, hostProcess, controller, showMacPermissionSetup;
 const viewerWindows = new Map();
 const viewerActions = new Set(['viewer.context', 'viewer.close', 'session.monitors', 'session.frame', 'session.input',
   'session.release-inputs', 'clipboard.read', 'clipboard.write', 'clipboard.local.write', 'files.list', 'files.upload',
@@ -91,13 +92,16 @@ async function start() {
         app.setLoginItemSettings({ openAtLogin: enabled, ...(process.platform === 'win32' ? { args: ['--background'] } : {}) });
       },
       writeLocalClipboard: text => clipboard.writeText(text),
-      openProject: () => shell.openExternal('https://github.com/Optimizer077/orbit-remote-public'),
+      openProject: () => shell.openExternal('https://github.com/Optimizer077/orbit-remote'),
       chooseFolder: async () => (await dialog.showOpenDialog(mainWindow, { title: 'Choose a dedicated Orbit transfer folder', properties: ['openDirectory', 'createDirectory'] })).filePaths[0],
       openFile: async () => (await dialog.showOpenDialog(mainWindow, { title: 'Send a file to the remote computer', properties: ['openFile'] })).filePaths[0],
       saveFile: async name => (await dialog.showSaveDialog(mainWindow, { title: 'Save remote file', defaultPath: path.basename(name) })).filePath,
     },
   });
   await controller.initialize();
+  if (process.platform === 'darwin') showMacPermissionSetup = createMacPermissionSetup({
+    dialog, systemPreferences, desktopCapturer, shell, getHostStatus: () => controller.local('status'),
+  });
   startHost(directory);
   let ready = false;
   for (let attempt = 0; attempt < 80; attempt++) {
@@ -170,7 +174,14 @@ function createWindow() {
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true,
       sandbox: true, nodeIntegration: false, webSecurity: true, spellcheck: false },
   });
-  Menu.setApplicationMenu(null);
+  Menu.setApplicationMenu(process.platform === 'darwin' ? Menu.buildFromTemplate([
+    { label: app.name, submenu: [
+      { role: 'about' }, { label: 'Set Up Mac Permissions…', click: () => openMacPermissionSetup() },
+      { type: 'separator' }, { role: 'services' }, { type: 'separator' },
+      { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }, { role: 'quit' },
+    ] },
+    { role: 'editMenu' }, { role: 'windowMenu' },
+  ]) : null);
   hardenWindow(mainWindow);
   mainWindow.on('close', event => { if (!quitting && tray) { event.preventDefault(); mainWindow.hide(); } });
   if (rendererUrl) mainWindow.loadURL(rendererUrl); else mainWindow.loadFile(entryFile);
@@ -232,10 +243,15 @@ function createTray() {
   tray.setToolTip('Orbit Remote — private remote access');
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: 'Open Orbit Remote', click: () => { mainWindow.show(); mainWindow.focus(); } },
+    ...(process.platform === 'darwin' ? [{ label: 'Set Up Mac Permissions…', click: () => openMacPermissionSetup() }] : []),
     { label: 'Disconnect all incoming sessions', click: async () => { try { await controller.local('disconnect-all', 'POST'); } catch (error) { dialog.showErrorBox('Disconnect failed', error.message); } } },
     { type: 'separator' }, { label: 'Quit Orbit and stop remote access', click: () => app.quit() },
   ]));
   tray.on('double-click', () => { mainWindow.show(); mainWindow.focus(); });
+}
+
+function openMacPermissionSetup() {
+  showMacPermissionSetup?.(mainWindow).catch(error => dialog.showErrorBox('Mac permission setup', error.message));
 }
 
 app.on('activate', () => mainWindow?.show());

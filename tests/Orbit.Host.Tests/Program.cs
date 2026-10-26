@@ -22,7 +22,10 @@ void Reject(Action action, string message)
     checks++;
     try { action(); failures.Add(message); } catch (Exception ex) when (ex is ArgumentException or UnauthorizedAccessException or InvalidOperationException) { }
 }
-var temporaryRoot = Path.Combine(Path.GetTempPath(), "orbit-security-tests-" + Guid.NewGuid().ToString("N"));
+// macOS exposes /var as a link to /private/var. Resolve the existing temp
+// ancestors before sandbox tests so they do not intentionally fail link guards.
+var temporaryBase = CanonicalDirectory(Path.GetTempPath());
+var temporaryRoot = Path.Combine(temporaryBase, "orbit-security-tests-" + Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(temporaryRoot);
 Process? host = null;
 Task<string>? hostOutput = null;
@@ -62,6 +65,8 @@ try
     lease.Clear(); Check(!lease.HasExpired(leaseNow.AddMinutes(1)), "Explicit disconnect clears input leases");
 
     SessionResumeChecks.Run(Check, Reject, temporaryRoot);
+    SessionIsolationChecks.Run(Check, temporaryRoot);
+    FrameQualityChecks.Run(Check, Reject);
     var stateDir = Path.Combine(temporaryRoot, "unit-state");
     var state = new HostState(stateDir);
     Reject(() => state.CreateInvite(new(null, new()), "https://127.0.0.1:47832", "pin"), "No-permissions invitation rejected");
@@ -206,8 +211,21 @@ try
         Check((await remote.GetAsync($"/api/sessions/{sessionId}/files")).StatusCode == HttpStatusCode.NotFound, "View-only device cannot list files");
         Check((await remote.GetAsync($"/api/sessions/{sessionId}/frame?monitorId=" + new string('x', 129))).StatusCode == HttpStatusCode.BadRequest, "Oversized monitor query returns 400 before capture");
         Check((await remote.GetAsync($"/api/sessions/{sessionId}/frame?monitorId=orbit-nonexistent-monitor")).StatusCode == HttpStatusCode.BadRequest, "Unknown monitor is rejected by the native backend without capturing a display");
+        Check((await remote.GetAsync($"/api/sessions/{sessionId}/frame?scale=NaN")).StatusCode == HttpStatusCode.BadRequest, "Nonfinite scale is rejected before capture");
+        Check((await remote.GetAsync($"/api/sessions/{sessionId}/frame?scale=0.5&scale=1")).StatusCode == HttpStatusCode.BadRequest, "Multiple scale values are rejected before capture");
+        Check((await remote.GetAsync($"/api/sessions/{sessionId}/frame?format=jpeg")).StatusCode == HttpStatusCode.BadRequest, "Unagreed lossy format is not silently accepted");
+        using (var invalidTag = new HttpRequestMessage(HttpMethod.Get, $"/api/sessions/{sessionId}/frame"))
+        {
+            invalidTag.Headers.TryAddWithoutValidation("If-None-Match", "*");
+            Check((await remote.SendAsync(invalidTag)).StatusCode == HttpStatusCode.BadRequest, "Wildcard cannot turn arbitrary frame requests into304");
+        }
         Check((await remote.PostAsJsonAsync($"/api/sessions/{sessionId}/power", new { action = "restart" })).StatusCode == HttpStatusCode.NotFound, "View-only device cannot request restart");
         Check((await remote.DeleteAsync($"/api/sessions/{sessionId}")).IsSuccessStatusCode, "Remote peer can end its own session");
+        using (var endedConditional = new HttpRequestMessage(HttpMethod.Get, $"/api/sessions/{sessionId}/frame"))
+        {
+            endedConditional.Headers.TryAddWithoutValidation("If-None-Match", "\"previous\"");
+            Check((await remote.SendAsync(endedConditional)).StatusCode == HttpStatusCode.NotFound, "Conditional requests cannot bypass ended-session ownership checks");
+        }
         var resumableResponse = await remote.PostAsJsonAsync("/api/sessions", new { viewOnly = true }); resumableResponse.EnsureSuccessStatusCode();
         var resumable = await resumableResponse.Content.ReadFromJsonAsync<JsonElement>();
         var previousEpoch = resumable.GetProperty("resumeEpoch").GetString();
@@ -234,6 +252,11 @@ try
     Check((await unpairedRemote.GetAsync("/api/info")).StatusCode == HttpStatusCode.Unauthorized, "Supplying a paired device ID cannot replace actual TLS certificate authentication");
     Check((await local.DeleteAsync("/api/peers/" + pairJson.GetProperty("deviceId").GetString())).IsSuccessStatusCode, "Local device revocation succeeds");
     Check((await remote.GetAsync("/api/info")).StatusCode == HttpStatusCode.Unauthorized, "Revocation is enforced on the next request of an existing TLS connection");
+    using (var revokedConditional = new HttpRequestMessage(HttpMethod.Get, "/api/sessions/previous-session/frame"))
+    {
+        revokedConditional.Headers.TryAddWithoutValidation("If-None-Match", "\"previous\"");
+        Check((await remote.SendAsync(revokedConditional)).StatusCode == HttpStatusCode.Unauthorized, "Revoked certificate cannot receive a304 heartbeat or frame metadata");
+    }
     Check(!(await local.GetStringAsync("/api/audit")).Contains(wireSecret), "API audit does not leak pairing secrets");
     using var noCertificate = new HttpClient(new HttpClientHandler { ServerCertificateCustomValidationCallback = (_, certificate, _, _) => certificate is not null && Security.Fingerprint(certificate) == fingerprint }) { BaseAddress = new Uri($"https://127.0.0.1:{remotePort}"), Timeout = TimeSpan.FromSeconds(5) };
     var noCertDenied = false;
@@ -251,7 +274,8 @@ finally
     if (failures.Count > 0 && hostOutput is not null) Console.Error.WriteLine(await hostOutput);
     if (failures.Count > 0 && hostError is not null) Console.Error.WriteLine(await hostError);
     var resolved = Path.GetFullPath(temporaryRoot);
-    if (resolved.StartsWith(Path.GetFullPath(Path.GetTempPath()), StringComparison.OrdinalIgnoreCase) && Path.GetFileName(resolved).StartsWith("orbit-security-tests-", StringComparison.Ordinal)) Directory.Delete(resolved, true);
+    var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+    if (string.Equals(Path.GetDirectoryName(resolved), temporaryBase.TrimEnd(Path.DirectorySeparatorChar), comparison) && Path.GetFileName(resolved).StartsWith("orbit-security-tests-", StringComparison.Ordinal)) Directory.Delete(resolved, true);
 }
 foreach (var failure in failures) Console.Error.WriteLine("FAIL: " + failure);
 Console.WriteLine($"{checks - failures.Count}/{checks} security checks passed.");
@@ -270,3 +294,15 @@ static HttpClient NewRemote(X509Certificate2 certificate, string pin, int port)
     return new HttpClient(handler) { BaseAddress = new Uri($"https://127.0.0.1:{port}"), Timeout = TimeSpan.FromSeconds(5) };
 }
 static int FreePort() { var listener = new TcpListener(IPAddress.Loopback, 0); listener.Start(); var port = ((IPEndPoint)listener.LocalEndpoint).Port; listener.Stop(); return port; }
+static string CanonicalDirectory(string directory)
+{
+    var full = Path.GetFullPath(directory);
+    var root = Path.GetPathRoot(full) ?? throw new InvalidOperationException("Temporary directory must be rooted.");
+    var current = root;
+    foreach (var component in full[root.Length..].Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries))
+    {
+        var info = new DirectoryInfo(Path.Combine(current, component));
+        current = info.ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? info.FullName;
+    }
+    return Path.TrimEndingDirectorySeparator(current);
+}

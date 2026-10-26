@@ -9,8 +9,8 @@ No software license is currently declared. Public source access does not itself 
 Install Git, Node.js 24 LTS, the .NET 10 SDK matching [`global.json`](global.json), and Tailscale. Use native architecture tools, especially on Apple silicon. Each computer must generate its own Orbit identity; never copy development profiles, keys, or pairing state between devices.
 
 ```bash
-git clone https://github.com/Optimizer077/orbit-remote-public.git
-cd orbit-remote-public
+git clone https://github.com/Optimizer077/orbit-remote.git
+cd orbit-remote
 ```
 
 Windows:
