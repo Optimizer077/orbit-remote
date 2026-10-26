@@ -102,10 +102,10 @@ export function ViewedBanner({ sessions, onEndOne, onEndAll, busy = false, initi
     title = `${names[0]} is ${controlling ? 'controlling this computer' : 'viewing this screen'}`;
     detail = controlling ? 'It can see your screen and use your mouse and keyboard.' : 'It can see your screen. It cannot use your mouse or keyboard.';
   } else {
-    title = `${sessions.length} devices are ${controlling ? 'connected to' : 'viewing'} this ${controlling ? 'computer' : 'screen'}`;
+    title = `${sessions.length} sessions are ${controlling ? 'connected to' : 'viewing'} this ${controlling ? 'computer' : 'screen'}`;
     detail = controlling
       ? `${controller.deviceName?.trim() || FALLBACK_NAME} has control of your mouse and keyboard. Also viewing: ${nameList(sessions.filter(s => s !== controller).map(s => s.deviceName?.trim() || FALLBACK_NAME))}.`
-      : `${nameList(names)} can see your screen.`;
+      : `${nameList([...new Set(names)])} can see your screen.`;
   }
 
   const Icon = controlling ? MousePointer2 : Eye;
@@ -144,7 +144,7 @@ export function ViewedBanner({ sessions, onEndOne, onEndAll, busy = false, initi
           return <li key={s.id} className={s.controlling ? 'is-controlling' : undefined}>
             <span className="viewed-row-icon" aria-hidden="true"><RowIcon size={15} /></span>
             <span className="viewed-row-copy">
-              <span className="viewed-row-name">{names[index]}</span>
+              <span className="viewed-row-name">{names.filter(name => name === names[index]).length > 1 ? names.indexOf(names[index]) === index ? `${names[index]} · ${names.filter(name => name === names[index]).length} sessions` : `Session ${names.slice(0, index + 1).filter(name => name === names[index]).length}` : names[index]}</span>
               <span className="viewed-row-meta">{s.controlling ? 'Controlling' : 'Viewing'}{seconds !== null && <> · <span aria-hidden="true" className="viewed-row-time">{clock(seconds)}</span><span className="viewed-sr">for {spoken(seconds)}</span></>}</span>
             </span>
             <button type="button" className="viewed-btn viewed-btn-end small" disabled={busy} onClick={() => onEndOne(s.id)}

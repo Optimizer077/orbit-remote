@@ -66,6 +66,7 @@ try
 
     SessionResumeChecks.Run(Check, Reject, temporaryRoot);
     SessionIsolationChecks.Run(Check, temporaryRoot);
+    await ParentProofChecks.RunAsync(Check, Reject);
     FrameQualityChecks.Run(Check, Reject);
     var stateDir = Path.Combine(temporaryRoot, "unit-state");
     var state = new HostState(stateDir);
@@ -163,7 +164,11 @@ try
     info.Environment["ORBIT_CONTROL_TOKEN"] = token; info.Environment["ORBIT_DATA_DIR"] = Path.Combine(temporaryRoot, "integration-state");
     info.Environment["ORBIT_CONTROL_PORT"] = controlPort.ToString(); info.Environment["ORBIT_REMOTE_PORT"] = remotePort.ToString();
     info.Environment["ORBIT_PARENT_WATCH"] = "1";
+    info.Environment["ORBIT_PARENT_PROOF"] = "1";
+    var parentProofKey = Security.RandomToken();
     host = Process.Start(info) ?? throw new InvalidOperationException("Test host failed to launch.");
+    await host.StandardInput.WriteLineAsync(JsonSerializer.Serialize(new { version = 1, proofKey = parentProofKey }));
+    await host.StandardInput.FlushAsync();
     hostOutput = host.StandardOutput.ReadToEndAsync(); hostError = host.StandardError.ReadToEndAsync();
     using var local = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{controlPort}"), Timeout = TimeSpan.FromSeconds(5) };
     local.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
@@ -175,6 +180,16 @@ try
         await Task.Delay(100);
     }
     Check(ready, "Host starts on loopback-test listeners");
+    using (var noBearer = new HttpClient { BaseAddress = local.BaseAddress })
+    using (var challengeRequest = new HttpRequestMessage(HttpMethod.Get, "/api/parent-proof"))
+    {
+        var challenge = Security.RandomToken(); challengeRequest.Headers.Add("X-Orbit-Challenge", challenge);
+        using var response = await noBearer.SendAsync(challengeRequest); response.EnsureSuccessStatusCode();
+        var bytes = await response.Content.ReadAsByteArrayAsync(); var proof = JsonSerializer.Deserialize<JsonElement>(bytes);
+        Check(response.Content.Headers.ContentLength == bytes.Length && response.Headers.TransferEncodingChunked != true, "Live child proof uses bounded fixed-length framing before bearer authentication");
+        Check(proof.GetProperty("pid").GetInt32() == host.Id && proof.GetProperty("challenge").GetString() == challenge, "Live child proof identifies the owned process and fresh challenge");
+        Check(proof.GetProperty("proof").GetString() == ParentProofChecks.Sign(parentProofKey, challenge, host.Id, controlPort, proof.GetProperty("clientPort").GetInt32()), "Live child proof authenticates with the independent stdin-only secret");
+    }
     using (var unauth = new HttpClient()) Check((await unauth.GetAsync($"http://127.0.0.1:{controlPort}/api/status")).StatusCode == HttpStatusCode.Unauthorized, "Local API rejects missing control token");
     using (var request = new HttpRequestMessage(HttpMethod.Get, "/api/status"))
     {

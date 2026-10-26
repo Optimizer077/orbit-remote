@@ -13,6 +13,7 @@ import { DevicesPage } from './ui/DevicesPage';
 import { ActivityPage } from './ui/ActivityPage';
 import { SettingsPage as SettingsPageV2 } from './ui/SettingsPage';
 import { Overview } from './ui/Overview';
+import { ViewedBanner } from './ui/ViewedBanner';
 import { CommandPalette, usePaletteShortcut, type Command as PaletteCommand } from './ui/CommandPalette';
 import { api, applyTheme, errorMessage, invoke, readThemePreference, securityCode, THEME_STORAGE_KEY, type AuditEntry, type Device, type Frame, type HostSettings, type HostStatus, type Invite, type Link, type Monitor as RemoteMonitor, type Permissions, type Session, type ThemePreference, type ViewerContext } from './api';
 
@@ -34,6 +35,15 @@ function BrandMark({ small = false }: { small?: boolean }) {
   return <span className={`brand-mark ${small ? 'small' : ''}`} aria-hidden="true"><svg viewBox="160 224 704 576" focusable="false" aria-hidden="true"><g fill="none" stroke="currentColor" strokeWidth="25"><circle cx="512" cy="512" r="220" /><ellipse cx="512" cy="512" rx="330" ry="122" transform="rotate(-32 512 512)" /></g><circle cx="512" cy="512" r="65" fill="currentColor" /><circle cx="791.86" cy="337.13" r="34" fill="currentColor" /></svg></span>;
 }
 
+function BrandWordmark() {
+  return <svg className="brand-wordmark" viewBox="0 0 550 160" aria-hidden="true" focusable="false">
+    <g transform="translate(-6 -6) scale(.167)" className="brand-wordmark-accent"><g fill="none" stroke="currentColor" strokeWidth="23"><circle cx="512" cy="512" r="220" /><ellipse cx="512" cy="512" rx="330" ry="122" transform="rotate(-32 512 512)" /></g><circle cx="512" cy="512" r="65" fill="currentColor" /><circle cx="791.86" cy="337.13" r="34" fill="currentColor" /></g>
+    <g className="brand-wordmark-text" fill="none" stroke="currentColor" strokeWidth="8" strokeLinecap="round" strokeLinejoin="round"><circle cx="220" cy="70" r="29" /><path d="M278 100V42M278 66C278 48 292 40 310 42M335 17V100M335 70C335 31 394 31 394 70C394 109 335 109 335 70ZM423 43V100M461 22V82Q461 101 480 101H491M445 43H492" /></g>
+    <circle className="brand-wordmark-text" cx="423" cy="21" r="5" fill="currentColor" /><circle className="brand-wordmark-accent" cx="518" cy="96" r="6" fill="currentColor" />
+    <path className="brand-wordmark-text" d="M190 141V124H197Q202 124 202 129Q202 133 197 133H190M197 133L203 141M218 141H208V124H218M208 132H216M224 141V124L232 135L240 124V141M255 124C245 124 245 141 255 141C265 141 265 124 255 124ZM268 124H282M275 124V141M298 141H288V124H298M288 132H296" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>;
+}
+
 function PlatformIcon({ platform, size = 22 }: { platform?: string; size?: number }) {
   if (/darwin|mac/i.test(platform || '')) return <Command size={size} />;
   if (/linux/i.test(platform || '')) return <Terminal size={size} />;
@@ -46,19 +56,6 @@ function platformName(value?: string) {
   if (/linux/i.test(value || '')) return 'Linux';
   return value || 'Computer';
 }
-
-function timeAgo(value?: string) {
-  if (!value) return 'No activity yet';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
-  if (seconds < 60) return 'Just now';
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
-  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-}
-
-function niceAction(action: string) { return action.replace(/[._-]/g, ' ').replace(/^\w/, c => c.toUpperCase()); }
 
 function Toggle({ checked, onChange, disabled, label }: { checked: boolean; onChange: (checked: boolean) => void; disabled?: boolean; label: string }) {
   return <button type="button" role="switch" aria-checked={checked} aria-label={label} disabled={disabled} className={`toggle ${checked ? 'on' : ''}`} onClick={() => onChange(!checked)}><span /></button>;
@@ -103,12 +100,13 @@ function WorkspaceApp() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
   const [toast, setToast] = useState('');
+  const [toastError, setToastError] = useState(false);
   const [pairMode, setPairMode] = useState<'invite' | 'join' | null>(null);
   const [selectedDevice, setSelectedDevice] = useState<Device | null>(null);
   const [activeSession, setActiveSession] = useState<ActiveSession | null>(null);
   const [connecting, setConnecting] = useState<string | null>(null);
-  const [search, setSearch] = useState('');
-  const [filter, setFilter] = useState<'all' | 'online'>('all');
+  const [endingIncoming, setEndingIncoming] = useState(false);
+  const incoming = (status?.sessions || []).filter(session => session.direction === 'incoming');
 
   useEffect(() => {
     applyTheme(theme);
@@ -129,10 +127,18 @@ function WorkspaceApp() {
     setLoading(false); setRefreshing(false);
   }, [Boolean(status)]);
 
-  useEffect(() => { void refresh(); const timer = window.setInterval(() => void refresh(true), 15000); return () => window.clearInterval(timer); }, [refresh]);
+  useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => { const timer = window.setInterval(() => void refresh(true), incoming.length ? 4000 : 15000); return () => window.clearInterval(timer); }, [refresh, incoming.length > 0]);
+  useEffect(() => window.orbit?.onIncomingChanged?.(() => void refresh(true)), [refresh]);
   useEffect(() => { if (!toast) return; const timer = window.setTimeout(() => setToast(''), 4500); return () => window.clearTimeout(timer); }, [toast]);
 
-  const notify = (message: string) => setToast(message);
+  const notify = (message: string) => { setToastError(false); setToast(message); };
+  const endIncoming = async (id?: string) => {
+    setEndingIncoming(true);
+    try { if (id) await api.end(id); else await api.disconnectIncoming(); await refresh(true); }
+    catch (reason) { setError(errorMessage(reason)); }
+    finally { setEndingIncoming(false); }
+  };
   const checkNetwork = async () => {
     setRefreshing(true);
     try {
@@ -142,6 +148,7 @@ function WorkspaceApp() {
     await refresh();
   };
   const connect = async (device: Device, viewOnly = false) => {
+    if (device.revoked || device.status === 'revoked') { setError(`${device.name}: ${device.statusReason || 'Access revoked by the host. Join a new invitation to pair again.'}`); return; }
     if (activeSession?.device.id === device.id && activeSession.viewOnly === viewOnly) { setPage('connections'); return; }
     setConnecting(device.id); setError('');
     try {
@@ -149,20 +156,19 @@ function WorkspaceApp() {
       const session = await api.start(device.id, viewOnly);
       setActiveSession({ ...session, device, viewOnly }); setPage('connections');
       void refresh(true);
-    } catch (e) { setError(errorMessage(e)); }
+    } catch (e) { const reason = errorMessage(e); setError(`Could not connect to ${device.name}: ${reason}`); if (/device.*sessions|session.*limit|maximum.*sessions/i.test(reason)) { setToastError(true); setToast(`${device.name}: ${reason}`); } }
     finally { setConnecting(null); }
   };
   const connected = status?.host?.tailscale?.connected === true;
-  const knownOnline = devices.filter(d => d.online === true).length;
   const localName = status?.host?.name || 'This computer';
   const sessionsCount = status?.sessions?.length ?? (activeSession ? 1 : 0);
   const [paletteOpen, setPaletteOpen] = useState(false);
   usePaletteShortcut(setPaletteOpen, !pairMode && !selectedDevice);
   // Command ids stay stable across launches: they key the palette's recent list.
   const commands = useMemo<PaletteCommand[]>(() => [
-    ...NAV.map(n => ({ id: `nav:${n.id}`, group: 'Navigate', label: `Go to ${n.label}`, icon: n.icon, keywords: ['page'], run: () => { setPage(n.id); setSearch(''); } })),
+    ...NAV.map(n => ({ id: `nav:${n.id}`, group: 'Navigate', label: `Go to ${n.label}`, icon: n.icon, keywords: ['page'], run: () => { setPage(n.id); } })),
     ...devices.flatMap(d => {
-      const blocked = d.direction === 'incoming' || !d.address;
+      const blocked = d.direction === 'incoming' || !d.address || d.revoked === true || d.status === 'revoked';
       const hint = blocked ? 'Can access this host' : `${d.online === true ? 'Online' : d.online === false ? 'Offline' : 'Not checked'} · ${platformName(d.platform)}`;
       return [
         { id: `device:${d.id}:connect`, group: 'Devices', label: `Connect to ${d.name}`, hint, icon: MonitorPlay, disabled: blocked || connecting !== null, keywords: ['control', 'remote'], run: () => void connect(d, false) },
@@ -179,21 +185,13 @@ function WorkspaceApp() {
       .map(([id, label, icon]) => ({ id: `theme:${id}`, group: 'Appearance', label: `Theme: ${label}`, hint: theme === id ? 'Current' : undefined, icon, keywords: ['theme', 'dark', 'light'], run: () => setTheme(id) })),
   // eslint-disable-next-line react-hooks/exhaustive-deps -- the run() closures read current state at call time
   ], [devices, connecting, status, theme]);
-  const filtered = devices.filter(d => (filter === 'all' || d.online === true) && `${d.name} ${d.platform} ${d.address || ''}`.toLowerCase().includes(search.toLowerCase()));
-
-  const deviceCards = (list: Device[]) => <div className="device-grid">{list.map(d => <article className="device-card" key={d.id}>
-    <div className="device-card-top"><div className="device-platform"><PlatformIcon platform={d.platform} size={25} /></div><button className="icon-button" aria-label={`Manage ${d.name}`} onClick={() => setSelectedDevice(d)}><Ellipsis size={22} /></button></div>
-    <h3>{d.name}</h3><div className="device-subtitle">{platformName(d.platform)}<span>·</span><span className={`device-online ${d.online === true ? 'yes' : ''}`}><i />{d.online === true ? 'Online' : d.online === false ? 'Offline' : 'Not checked'}</span></div>
-    <div className="device-address"><Network size={13} /><span>{d.address || 'Paired computer'}</span><LockKeyhole size={12} /></div>
-    <div className="device-card-bottom"><span>{d.direction === 'incoming' ? 'Can access this host' : d.lastSeen ? `Seen ${timeAgo(d.lastSeen).toLowerCase()}` : 'Trusted device'}</span><button className="button small primary" disabled={connecting !== null || d.direction === 'incoming' || !d.address} title={d.direction === 'incoming' ? 'This pairing authorizes access to your host. Create a reverse invitation to access that computer.' : undefined} onClick={() => void connect(d)}>{connecting === d.id ? <Loader2 size={14} className="spin" /> : <ArrowUpRight size={15} />} Connect</button></div>
-  </article>)}</div>;
 
   return <div className="app-shell">
     <aside className="sidebar">
-      <button className="brand" onClick={() => setPage('overview')} aria-label="Orbit home"><BrandMark /><span>orbit<span className="brand-dot">.</span></span></button>
+      <button className="brand" onClick={() => setPage('overview')} aria-label="Orbit home"><BrandWordmark /><BrandMark /></button>
       <div className="workspace"><span className="workspace-avatar">P</span><div><strong>Personal workspace</strong><span>Your private network</span></div><ChevronDown size={15} /></div>
       <div className="nav-label">WORKSPACE</div>
-      <nav aria-label="Main navigation">{NAV.map(({ id, label, icon: Icon }) => <button key={id} className={`nav-item ${page === id ? 'active' : ''}`} onClick={() => { setPage(id); setSearch(''); }}><Icon size={19} strokeWidth={1.7} /><span>{label}</span>{id === 'devices' && devices.length > 0 && <b>{devices.length}</b>}{id === 'connections' && activeSession && <i className="nav-live" />}</button>)}</nav>
+      <nav aria-label="Main navigation">{NAV.map(({ id, label, icon: Icon }) => <button key={id} className={`nav-item ${page === id ? 'active' : ''}`} onClick={() => setPage(id)}><Icon size={19} strokeWidth={1.7} /><span>{label}</span>{id === 'devices' && devices.length > 0 && <b>{devices.length}</b>}{id === 'connections' && activeSession && <i className="nav-live" />}</button>)}</nav>
       <div className="sidebar-bottom">
         <div className="private-card"><div className="private-icon"><ShieldCheck size={18} /></div><strong>Private. By design.</strong><p>Your computers, connected<br />through your Tailscale network.</p><span>Built for your own orbit <ArrowUpRight size={12} /></span></div>
         <div className="local-user"><div className={`local-avatar ${connected ? 'connected' : ''}`}><Laptop size={18} /></div><div><strong>{localName}</strong><span>{status ? platformName(status.host.platform) : 'Connecting to service'}</span></div><span className="version">v{status?.host.version || '0.1'}</span></div>
@@ -203,21 +201,22 @@ function WorkspaceApp() {
     <main className={`main ${activeSession && page === 'connections' ? 'session-page' : ''}`}>
       <header className="topbar"><div className="breadcrumb"><span>Workspace</span><ChevronRight size={13} /><strong>{NAV.find(n => n.id === page)?.label}</strong></div><div className="topbar-right"><span className={`network-pill ${connected ? 'connected' : ''}`}><i />{status?.host.testMode ? 'Local test mode' : connected ? 'Tailscale connected' : loading ? 'Checking network' : 'Tailscale disconnected'}</span><button className={`icon-button ${refreshing ? 'spin' : ''}`} title="Refresh host and check device availability" aria-label="Refresh host and check device availability" disabled={refreshing} onClick={() => void checkNetwork()}><RefreshCw size={16} /></button><div className="topbar-divider" /><span className="personal-avatar">P</span></div></header>
       <div className="main-content">
+        <ViewedBanner sessions={incoming.map(session => ({ ...session, controlling: session.permissions?.control === true }))} busy={endingIncoming} onEndOne={id => void endIncoming(id)} onEndAll={() => void endIncoming()} />
         {error && <div className="error-banner" role="alert"><Shield size={17} /><span>{error}</span><button className="icon-button" aria-label="Dismiss error" onClick={() => setError('')}><X size={16} /></button></div>}
 
-        {page === 'overview' && <Overview status={status} devices={devices} activity={audits} sessionsCount={sessionsCount}
+        {page === 'overview' && <Overview status={status} devices={devices} activity={audits} sessionsCount={sessionsCount} sessions={status?.sessions}
           connecting={connecting} loading={loading}
           onAddDevice={() => setPairMode('invite')} onJoin={() => setPairMode('join')}
           onConnect={(device, viewOnly) => void connect(device, viewOnly)} onManage={setSelectedDevice} onNavigate={setPage}
           onCopyAddress={() => { void copyText(status?.host.tailscale.ip || '').then(() => notify('Tailscale address copied.')).catch(e => setError(errorMessage(e))); }} />}
 
-        {page === 'devices' && <DevicesPage devices={devices} connecting={connecting} onAddDevice={() => setPairMode('invite')} onJoin={() => setPairMode('join')}
+        {page === 'devices' && <DevicesPage devices={devices} sessions={status?.sessions} connecting={connecting} onAddDevice={() => setPairMode('invite')} onJoin={() => setPairMode('join')}
           onConnect={(device, viewOnly) => void connect(device, viewOnly ?? false)} onManage={setSelectedDevice} onRefresh={() => void refresh()} refreshing={refreshing} />}
 
         {page === 'connections' && (activeSession ? <RemoteSession session={activeSession} onEnded={() => { setActiveSession(null); void refresh(true); }} onError={setError} notify={notify} /> : <>
           <PageHeading eyebrow="A DESKTOP, WITHOUT THE DISTANCE" title="Make yourself at home." description="Open a private session to one of your paired computers." />
           <div className="panel"><EmptyState icon={Link2} title="No active connection" description={devices.length ? 'Choose a computer below to open its desktop. View-only access is available from the device menu.' : 'Your remote desktop will appear here. Pair a computer to start your first session.'} action={!devices.length && <button className="button primary" onClick={() => setPairMode('invite')}><Plus size={16} /> Add a device</button>} /></div>
-          {devices.length > 0 && <><div className="section-heading"><div><h2>Choose a computer</h2></div></div>{deviceCards(devices)}</>}
+          {devices.length > 0 && <><div className="section-heading"><div><h2>Choose a computer</h2></div></div><DevicesPage embedded devices={devices} sessions={status?.sessions} connecting={connecting} onAddDevice={() => setPairMode('invite')} onJoin={() => setPairMode('join')} onConnect={(device, viewOnly) => void connect(device, viewOnly ?? false)} onManage={setSelectedDevice} /></>}
         </>)}
 
         {page === 'activity' && <ActivityPage entries={audits} refreshing={refreshing} onRefresh={() => void refresh()} />}
@@ -225,7 +224,7 @@ function WorkspaceApp() {
         {page === 'settings' && <SettingsPageV2 status={status} theme={theme} onThemeChange={setTheme} onSaved={() => { void refresh(); notify('Host settings saved.'); }} onError={setError} aboutContent={<AboutOrbit status={status} onError={setError} />} />}
       </div>
     </main>
-    {toast && <div className="toast" role="status"><span><Check size={16} /></span>{toast}<button aria-label="Dismiss notification" onClick={() => setToast('')}><X size={14} /></button></div>}
+    {toast && <div className={`toast ${toastError ? 'is-error' : ''}`} role={toastError ? 'alert' : 'status'}><span>{toastError ? <Shield size={16} /> : <Check size={16} />}</span>{toast}<button aria-label="Dismiss notification" onClick={() => setToast('')}><X size={14} /></button></div>}
     {pairMode && <PairModal mode={pairMode} connected={connected} onClose={() => setPairMode(null)} onPaired={() => { setPairMode(null); setPage('devices'); void refresh(); notify('Device paired. Your orbit just got a little bigger.'); }} onError={setError} notify={notify} />}
     <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} commands={commands} />
     {selectedDevice && <DeviceModal device={selectedDevice} onClose={() => setSelectedDevice(null)} onConnect={viewOnly => { setSelectedDevice(null); void connect(selectedDevice, viewOnly); }} onChanged={() => { setSelectedDevice(null); void refresh(); }} onError={setError} notify={notify} />}
@@ -277,40 +276,12 @@ function DeviceModal({ device, onClose, onConnect, onChanged, onError, notify }:
   const revoke = async () => { setBusy(true); try { if (incoming) await api.revoke(device.id); else await invoke('device.forget', { deviceId: device.id }); notify(incoming ? 'Device revoked. It can no longer connect to this host.' : 'Connection forgotten on this computer.'); onChanged(); } catch (e) { setError(errorMessage(e)); onError(errorMessage(e)); } finally { setBusy(false); } };
   return <Modal title={device.name} subtitle={`${platformName(device.platform)} · ${device.address || device.id}`} onClose={onClose}>
     {error && <div className="inline-error">{error}</div>}
-    {device.direction === 'incoming' ? <div className="inline-notice subtle-notice"><ShieldCheck size={17} /><span>This computer has permission to access your host. To connect in the other direction, create an invite on that computer and join it here.</span></div> : <div className="device-modal-actions"><button className="button primary" disabled={!device.address} onClick={() => onConnect(false)}><MousePointer2 size={16} /> Connect</button><button className="button secondary" disabled={!device.address} onClick={() => onConnect(true)}><Monitor size={16} /> View only</button></div>}
+    {device.direction === 'incoming' ? <div className="inline-notice subtle-notice"><ShieldCheck size={17} /><span>This computer has permission to access your host. To connect in the other direction, create an invite on that computer and join it here.</span></div> : <div className="device-modal-actions"><button className="button primary" disabled={!device.address || device.revoked || device.status === 'revoked'} onClick={() => onConnect(false)}><MousePointer2 size={16} /> Connect</button><button className="button secondary" disabled={!device.address || device.revoked || device.status === 'revoked'} onClick={() => onConnect(true)}><Monitor size={16} /> View only</button></div>}
     {code && <div className="security-code-card"><div className="subsection-label">SECURITY CODE</div><code>{code}</code><p>On {device.name}, open Overview → This computer. Its security code must match this one exactly. {incoming ? 'If it differs, revoke this device: it is not the computer you meant to pair.' : 'If it differs, don’t connect: forget this device and pair again.'}</p></div>}
     <div className="subsection-label">GRANTED PERMISSIONS</div><PermissionRows permissions={permissions} onChange={setPermissions} disabled />
     <p className="form-footnote">{incoming ? 'Permissions belong to this pairing. To change access, revoke it and create a new invitation with the permissions you want.' : 'These permissions were granted by the remote host. Its owner manages access to that computer.'}</p>
     <div className="danger-zone">{revokeConfirm ? <><div><strong>{incoming ? 'Revoke' : 'Forget'} {device.name}?</strong><p>{incoming ? 'This removes access to this host. Pair again to restore it.' : 'This removes the saved connection here. It does not revoke any access you granted on another host.'}</p></div><div className="heading-actions"><button className="button secondary small" onClick={() => setRevokeConfirm(false)}>Cancel</button><button className="button danger small" disabled={busy} onClick={() => void revoke()}>{busy ? <Loader2 size={14} className="spin" /> : <Unplug size={14} />} {incoming ? 'Revoke device' : 'Forget connection'}</button></div></> : <><div><strong>Remove this connection</strong><p>{incoming ? 'Revoke this device’s access immediately.' : 'Remove this saved connection from this computer.'}</p></div><button className="button danger-text small" onClick={() => setRevokeConfirm(true)}><Unplug size={14} /> {incoming ? 'Revoke' : 'Forget'}</button></>}</div>
   </Modal>;
-}
-
-function SettingsPage({ status, theme, onThemeChange, onSaved, onError }: { status: HostStatus | null; theme: ThemePreference; onThemeChange: (theme: ThemePreference) => void; onSaved: () => void; onError: (e: string) => void }) {
-  const [settings, setSettings] = useState<HostSettings>({ hostName: '', allowControl: false, allowClipboard: false, allowFiles: false, allowPower: false, startAtLogin: false });
-  const [busy, setBusy] = useState(false);
-  useEffect(() => { if (status?.settings) setSettings(status.settings); }, [status?.host.id]);
-  const save = async () => { setBusy(true); try { const { startAtLogin, ...policy } = settings; await api.updateSettings(status?.settings.startAtLoginSupported ? settings : policy); onSaved(); } catch (e) { onError(errorMessage(e)); } finally { setBusy(false); } };
-  const capabilities = [
-    { key: 'allowControl' as const, capability: 'input', icon: MousePointer2, title: 'Remote mouse & keyboard', detail: 'Choose mouse and keyboard access when you create a pairing invitation.' },
-    { key: 'allowClipboard' as const, capability: 'clipboard', icon: Clipboard, title: 'Clipboard sharing', detail: 'Clipboard access is off by default. Enable it only for pairings you trust.' },
-    { key: 'allowFiles' as const, capability: 'files', icon: FolderOpen, title: 'File transfer', detail: 'Allow transfers within Orbit’s designated shared folder.' },
-    { key: 'allowPower' as const, capability: 'power', icon: Power, title: 'Lock & restart', detail: 'Allow paired devices with power permission to request host power actions.' },
-  ];
-  return <><PageHeading eyebrow="MAKE ORBIT YOUR OWN" title="Your computer. Your rules." description="Control how this host appears and what remote devices can do." action={<button className="button primary" disabled={busy || !status || !settings.hostName.trim()} onClick={() => void save()}>{busy ? <Loader2 size={16} className="spin" /> : <Check size={16} />} Save changes</button>} />
-    <div className="settings-layout"><div className="settings-main"><AppearanceSettings theme={theme} onChange={onThemeChange} /><section className="panel settings-panel"><div className="settings-section-title"><Laptop size={20} /><div><h2>This host</h2><p>The identity of this computer in your private network.</p></div></div><label className="field-label" htmlFor="host-name">COMPUTER NAME</label><input className="text-input" id="host-name" value={settings.hostName} maxLength={80} disabled={!status} placeholder="Name your computer" onChange={e => setSettings(s => ({ ...s, hostName: e.target.value }))} /><div className="settings-detail"><span>Operating system</span><strong>{platformName(status?.host.platform)}</strong></div><div className="settings-detail"><span>Host identity</span><code title={status?.host.id}>{status?.host.id?.slice(0, 20) || 'Waiting for service'}{status?.host.id && status.host.id.length > 20 ? '…' : ''}</code></div><div className="settings-detail"><span>Service version</span><strong>{status?.host.version || '—'}</strong></div></section>
-    <section className="panel settings-panel"><div className="settings-section-title"><SlidersHorizontal size={20} /><div><h2>Remote access</h2><p>Host policy applies in addition to each pairing’s permissions.</p></div></div>{capabilities.map(({ key, capability, icon: Icon, title, detail }) => <div className="settings-capability" key={key}><span className="setting-icon"><Icon size={18} /></span><div><strong>{title}</strong><p>{detail}</p>{status && !status.capabilities?.[capability] && <span className="capability-unavailable">Unavailable on this host</span>}</div>{key === 'allowControl' || key === 'allowClipboard' ? <span className="label">PER PAIRING</span> : <Toggle label={title} checked={Boolean(settings[key])} disabled={!status || !status.capabilities?.[capability]} onChange={value => setSettings(s => ({ ...s, [key]: value }))} />}</div>)}</section>
-    <section className="panel settings-panel"><div className="settings-section-title"><Zap size={20} /><div><h2>Stay within reach</h2><p>Startup and availability.</p></div></div><div className="settings-capability"><span className="setting-icon"><Power size={18} /></span><div><strong>Start Orbit at sign-in</strong><p>Launch Orbit automatically when you sign in to this computer.</p><span className="capability-unavailable">Available in the packaged desktop app. Pre-login access requires a separate system service installation.</span></div><Toggle label="Start Orbit at sign-in" checked={Boolean(settings.startAtLogin)} disabled={!status?.settings.startAtLoginSupported} onChange={value => setSettings(s => ({ ...s, startAtLogin: value }))} /></div></section><AboutOrbit status={status} onError={onError} /></div>
-    <aside className="settings-aside"><div className="panel network-diagnostics"><div className="settings-section-title"><Network size={20} /><div><h2>Network health</h2><p>Live host diagnostics</p></div></div><div className={`network-state ${status?.host.tailscale.connected ? 'ready' : ''}`}><span /><strong>{status?.host.testMode ? 'Local test mode' : status?.host.tailscale.connected ? 'Tailscale connected' : 'Connection needed'}</strong></div><dl><div><dt>Tailscale installed</dt><dd>{status ? status.host.tailscale.available ? 'Detected' : 'Not detected' : 'Checking'}</dd></div><div><dt>Private IP</dt><dd>{status?.host.tailscale.ip || '—'}</dd></div><div><dt>DNS name</dt><dd>{status?.host.tailscale.dnsName || '—'}</dd></div><div><dt>Host port</dt><dd>{settings.listenPort || '—'}</dd></div></dl>{status?.host.tailscale.error && <div className="inline-error">{status.host.tailscale.error}</div>}</div><UnattendedAvailability status={status} /><div className="settings-help"><ShieldCheck size={24} /><h3>Two layers of trust.</h3><p>Tailscale provides your private network. Orbit pairing decides who can connect and what they can do.</p><p>Keep your tailnet access policy limited to the people and devices you trust.</p></div></aside></div></>;
-}
-
-function AppearanceSettings({ theme, onChange }: { theme: ThemePreference; onChange: (theme: ThemePreference) => void }) {
-  const themes = [
-    { id: 'daylight' as const, name: 'Daylight', description: 'Bright and crisp' },
-    { id: 'graphite' as const, name: 'Graphite', description: 'Neutral and focused' },
-    { id: 'midnight' as const, name: 'Midnight', description: 'A little after hours' },
-    { id: 'paper' as const, name: 'Paper', description: 'Warm and calm' },
-  ];
-  return <section className="panel settings-panel appearance-panel"><div className="settings-section-title"><Palette size={20} /><div><h2>Make yourself comfortable</h2><p>A different atmosphere. The same private orbit.</p></div><span className="appearance-saved"><Check size={11} /> Saved here</span></div><div className="theme-choices" role="group" aria-label="Appearance theme">{themes.map(option => <button key={option.id} className={`theme-choice ${theme === option.id ? 'selected' : ''}`} aria-label={`Use ${option.name} theme`} aria-pressed={theme === option.id} onClick={() => onChange(option.id)}><div className={`theme-preview preview-${option.id}`} aria-hidden="true"><div className="preview-sidebar"><i /><span /><span /><span /></div><div className="preview-main"><i /><strong /><span /><div><b /><b /><b /></div><em /></div><span className="preview-check"><Check size={12} /></span></div><div className="theme-choice-label"><strong>{option.name}</strong><span className="theme-radio"><i /></span></div><p>{option.description}</p></button>)}</div><div className="system-theme-row"><Monitor size={16} /><div><strong>Follow your system</strong><span>Daylight by day. Graphite when your system goes dark.</span></div><Toggle label="Follow system appearance" checked={theme === 'system'} onChange={enabled => onChange(enabled ? 'system' : 'daylight')} /></div><p className="appearance-local-note">Appearance changes instantly and stays on this computer.</p></section>;
 }
 
 function AboutOrbit({ status, onError }: { status: HostStatus | null; onError: (error: string) => void }) {
@@ -351,26 +322,6 @@ function AboutOrbit({ status, onError }: { status: HostStatus | null; onError: (
   </section>;
 }
 
-function UnattendedAvailability({ status }: { status: HostStatus | null }) {
-  const notes = (status?.limitations || []).flatMap(note => {
-    if (/locked screens|lock screens|logged-in interactive/i.test(note)) return /remote locking/i.test(note) ? ['Remote screen locking is not available on this computer.'] : [];
-    if (/integrity isolation/i.test(note)) return ['Some administrator apps cannot be controlled from this desktop. Protected permission prompts are unavailable.'];
-    if (/PNG snapshot/i.test(note)) return ['Screen sharing uses still-image updates. Audio and smooth video streaming are not available yet.'];
-    if (/Screen Recording permission/i.test(note)) return ['On this Mac, allow Screen Recording to share the screen and Accessibility to use the mouse and keyboard.'];
-    if (/macOS backend.*validation/i.test(note)) return ['macOS support still needs testing on a physical Mac.'];
-    if (/Only local X11/i.test(note)) return ['Linux access requires an unlocked X11 desktop. Wayland desktops are not supported yet.'];
-    if (/Linux backend.*validation/i.test(note)) return ['Linux support still needs testing on a physical desktop with screen-capture support installed.'];
-    if (/Capture requires ffmpeg/i.test(note)) return ['Install ffmpeg on this computer to enable screen sharing.'];
-    if (/control require xdotool/i.test(note)) return ['Install xdotool on this computer to enable mouse and keyboard control.'];
-    if (/enumeration requires xrandr/i.test(note)) return ['Install xrandr on this computer to detect its displays.'];
-    if (/Clipboard requires xclip/i.test(note)) return ['Install xclip on this computer to enable clipboard sharing.'];
-    return [note.replace(/backend/gi, 'support')];
-  });
-  const state = status?.sessionState;
-  const stateText = state === 'interactive' ? 'Desktop is signed in and unlocked' : state && /locked|secure/.test(state) ? 'Desktop is locked or protected' : state ? 'An unlocked desktop is not available' : 'Desktop availability is not confirmed';
-  return <section className="panel unattended-notice"><div className="settings-section-title"><LockKeyhole size={20} /><div><h2>Unattended availability</h2><p>Know when this host is within reach.</p></div></div><div className="availability-state"><span className={`small-dot ${state === 'interactive' ? 'green' : ''}`} />{stateText}</div><p>{status ? 'This build needs an unlocked, signed-in desktop. Access while locked and recovery before sign-in are not available yet.' : 'Connect to the host service to check desktop availability.'}</p>{notes.length > 0 && <ul>{[...new Set(notes)].map(note => <li key={note}>{note}</li>)}</ul>}</section>;
-}
-
 type FileEntry = { name: string; path: string; size?: number; isDirectory?: boolean; directory?: boolean };
 
 // Shows the encryption measured on the latest request, never a fixed claim.
@@ -386,8 +337,10 @@ function RemoteSession({ session, onEnded, onError, notify, initialMonitorId = '
   const [frame, setFrame] = useState<Frame | null>(null);
   const [frameError, setFrameError] = useState('');
   const [lastFrameAt, setLastFrameAt] = useState<number | null>(null);
+  const [frameDelivery, setFrameDelivery] = useState<{ bytes?: number; unchanged: boolean }>({ unchanged: false });
   const [monitors, setMonitors] = useState<RemoteMonitor[]>([]);
   const [monitorId, setMonitorId] = useState(initialMonitorId);
+  const [frameScale, setFrameScale] = useState(1);
   const [control, setControl] = useState(false);
   const [focused, setFocused] = useState(false);
   const [fit, setFit] = useState(true);
@@ -405,7 +358,7 @@ function RemoteSession({ session, onEnded, onError, notify, initialMonitorId = '
   const heldKeys = useRef(new Map<string, {key: string; code: string}>());
   const keyRepeatTimes = useRef(new Map<string, number>());
   const { record, reset, stats } = useFrameStats();
-  useEffect(() => { reset(); }, [reset, monitorId, session.sessionId]);
+  useEffect(() => { reset(); }, [reset, monitorId, frameScale, session.sessionId]);
   const permissions: Permissions = { view: false, control: false, clipboard: false, files: false, power: false, ...(session.permissions || session.device.permissions) };
 
   useEffect(() => {
@@ -415,8 +368,8 @@ function RemoteSession({ session, onEnded, onError, notify, initialMonitorId = '
     const poll = async () => {
       try {
         const started = performance.now();
-        const next = await api.frame(session.sessionId, monitorId || undefined);
-        if (!stopped) { if (next.dataUrl) { record(performance.now() - started, Math.round(next.dataUrl.length * 0.75)); setFrame(next); setFrameError(''); setLastFrameAt(Date.now()); } }
+        const next = await api.frame(session.sessionId, monitorId || undefined, frameScale);
+        if (!stopped) { if (next.dataUrl) { const payload = next.dataUrl.slice(next.dataUrl.indexOf(',') + 1); const bytes = next.bytes ?? (payload.length * 3 / 4 - (payload.endsWith('==') ? 2 : payload.endsWith('=') ? 1 : 0)); record(performance.now() - started, bytes, next.unchanged === true); setFrameDelivery({ bytes, unchanged: next.unchanged === true }); setFrame(next); setFrameError(''); setLastFrameAt(Date.now()); } }
       } catch (e) {
         if (!stopped) {
           const reason = errorMessage(e);
@@ -430,7 +383,7 @@ function RemoteSession({ session, onEnded, onError, notify, initialMonitorId = '
     };
     void poll();
     return () => { stopped = true; window.clearTimeout(timer); };
-  }, [session.sessionId, monitorId, sessionEnded]);
+  }, [session.sessionId, monitorId, frameScale, sessionEnded]);
 
   useEffect(() => { void api.monitors(session.sessionId).then(setMonitors).catch(() => undefined); }, [session.sessionId]);
   // Input stays paused while the stream is failing or ended, even if something re-enables control locally.
@@ -471,10 +424,10 @@ function RemoteSession({ session, onEnded, onError, notify, initialMonitorId = '
 
   return <div className="remote-session"><div className="session-heading"><div className="session-identity"><span className="session-platform"><PlatformIcon platform={session.device.platform} /></span><div><h1>{session.device.name}</h1><span><i className={`small-dot ${sessionEnded ? '' : 'green'}`} /> {sessionEnded ? 'Session ended' : frameError ? 'Reconnecting to desktop' : frame ? 'Desktop connected' : 'Opening desktop'}<span className="session-heading-sep">·</span>{platformName(session.device.platform)}</span></div></div><button className="button danger-outline small" disabled={ending} onClick={() => void disconnect()}>{ending ? <Loader2 size={15} className="spin" /> : <Unplug size={15} />} {popout ? 'Close screen' : 'Disconnect'}</button></div>
     <div className="screen-window-note"><Monitor size={12} /><span>{popout ? 'This screen shares the existing connection. Closing it keeps your other windows connected.' : 'Open existing host displays in separate windows. Creating additional virtual displays is planned.'}</span></div>
-    <SessionHud title={session.device.name} link={frame?.link || session.link} ended={sessionEnded} state={sessionEnded ? 'ended' : frameError && frame ? 'reconnecting' : 'live'} stats={stats} controlling={control} viewOnly={session.viewOnly} detail={frameError || undefined} toolbar={<><div className="toolbar-group"><Monitor size={16} /><select aria-label="Remote monitor" disabled={popout || sessionEnded} value={monitorId} onChange={e => { releaseKeys(); setControl(false); setMonitorId(e.target.value); setFrame(null); }}>{monitors.length === 0 && <option value="">Primary display</option>}{monitors.length > 0 && <option value="">Primary display</option>}{monitors.map(m => <option key={m.id} value={m.id}>{m.name} · {m.width} × {m.height}</option>)}</select></div>{!popout && <button className="toolbar-button screen-popout-button" aria-label="Open screen in window" title="Open an existing host display in its own window. Creating virtual displays is planned." disabled={openingScreen || ending || sessionEnded} onClick={() => void openScreen()}>{openingScreen ? <Loader2 size={15} className="spin" /> : <ExternalLink size={15} />}<span>Open screen in window</span></button>}<div className="toolbar-group"><button className={`toolbar-button ${fit ? 'selected' : ''}`} onClick={() => setFit(true)} title="Fit to window"><Maximize2 size={15} /><span>Fit</span></button><button className={`toolbar-button ${!fit ? 'selected' : ''}`} onClick={() => setFit(false)}>1:1</button></div><div className="toolbar-spacer" /><button className="toolbar-button" disabled={sessionEnded || !permissions.clipboard} title={!permissions.clipboard ? 'Clipboard permission not granted' : 'Clipboard'} onClick={() => openTool('clipboard')}><Clipboard size={16} /><span>Clipboard</span></button><button className="toolbar-button" disabled={sessionEnded || !permissions.files} title={!permissions.files ? 'File permission not granted' : 'Shared files'} onClick={() => openTool('files')}><FolderOpen size={16} /><span>Files</span></button><button className="toolbar-button" disabled={sessionEnded || !permissions.power} title={!permissions.power ? 'Power permission not granted' : 'Lock and restart'} onClick={() => openTool('power')}><Power size={16} /></button><span className="toolbar-divider" /><button className={`button small ${control ? 'primary' : 'secondary'}`} disabled={sessionEnded || session.viewOnly || !permissions.control || !frame || !!frameError} onClick={() => { setControl(c => !c); if (!control) viewer.current?.focus(); }}><MousePointer2 size={15} />{session.viewOnly ? 'View only' : control ? 'Control enabled' : 'Take control'}</button></>}>
+    <SessionHud title={session.device.name} link={frame?.link || session.link} ended={sessionEnded} state={sessionEnded ? 'ended' : frameError && frame ? 'reconnecting' : 'live'} stats={stats} controlling={control} viewOnly={session.viewOnly} detail={frameError || undefined} toolbar={<><div className="toolbar-group"><Monitor size={16} /><select aria-label="Remote monitor" disabled={popout || sessionEnded} value={monitorId} onChange={e => { releaseKeys(); setControl(false); setMonitorId(e.target.value); setFrame(null); }}>{monitors.length === 0 && <option value="">Primary display</option>}{monitors.length > 0 && <option value="">Primary display</option>}{monitors.map(m => <option key={m.id} value={m.id}>{m.name} · {m.width} × {m.height}</option>)}</select></div>{session.canScaleFrames && <div className="toolbar-group"><select aria-label="Screen image quality" title="Smaller screen images reduce image transfer. Pointer coordinates always use the full desktop." disabled={sessionEnded} value={frameScale} onChange={event => { releaseKeys(); setControl(false); setFrameScale(Number(event.target.value)); setFrame(null); }}><option value={1}>Full detail</option><option value={0.75}>Balanced · 75%</option><option value={0.5}>Lighter · 50%</option></select></div>}{!popout && <button className="toolbar-button screen-popout-button" aria-label="Open screen in window" title="Open an existing host display in its own window. Creating virtual displays is planned." disabled={openingScreen || ending || sessionEnded} onClick={() => void openScreen()}>{openingScreen ? <Loader2 size={15} className="spin" /> : <ExternalLink size={15} />}<span>Open screen in window</span></button>}<div className="toolbar-group"><button className={`toolbar-button ${fit ? 'selected' : ''}`} onClick={() => setFit(true)} title="Fit to window"><Maximize2 size={15} /><span>Fit</span></button><button className={`toolbar-button ${!fit ? 'selected' : ''}`} onClick={() => setFit(false)}>1:1</button></div><div className="toolbar-spacer" /><button className="toolbar-button" disabled={sessionEnded || !permissions.clipboard} title={!permissions.clipboard ? 'Clipboard permission not granted' : 'Clipboard'} onClick={() => openTool('clipboard')}><Clipboard size={16} /><span>Clipboard</span></button><button className="toolbar-button" disabled={sessionEnded || !permissions.files} title={!permissions.files ? 'File permission not granted' : 'Shared files'} onClick={() => openTool('files')}><FolderOpen size={16} /><span>Files</span></button><button className="toolbar-button" disabled={sessionEnded || !permissions.power} title={!permissions.power ? 'Power permission not granted' : 'Lock and restart'} onClick={() => openTool('power')}><Power size={16} /></button><span className="toolbar-divider" /><button className={`button small ${control ? 'primary' : 'secondary'}`} disabled={sessionEnded || session.viewOnly || !permissions.control || !frame || !!frameError} onClick={() => { setControl(c => !c); if (!control) viewer.current?.focus(); }}><MousePointer2 size={15} />{session.viewOnly ? 'View only' : control ? 'Control enabled' : 'Take control'}</button></>}>
     <div ref={viewer} tabIndex={0} aria-label="Remote desktop. Enable Take control to send keyboard and mouse input. Escape releases control." className={`remote-viewer ${fit ? 'fit' : 'actual'} ${control ? 'controlling' : ''} ${focused ? 'focused' : ''}`} onFocus={() => setFocused(true)} onBlur={() => { setFocused(false); releaseKeys(); }} onMouseLeave={() => { if (control) releaseKeys(); }} onContextMenu={e => { if (control) e.preventDefault(); }} onMouseMove={e => { if (!control || Date.now() - lastMove.current < 40) return; const p = point(e); if (p) { lastMove.current = Date.now(); send({ type: 'pointer.move', ...p }); } }} onMouseDown={e => { if (!control) return; const p = point(e); if (p) { e.preventDefault(); e.currentTarget.focus(); send({ type: 'pointer.button', button: e.button, down: true, ...p }); } }} onMouseUp={e => { if (!control) return; const p = point(e); if (p) { e.preventDefault(); send({ type: 'pointer.button', button: e.button, down: false, ...p }); } else { releaseKeys(); } }} onWheel={e => { if (!control) return; const p = point(e); if (p) send({ type: 'pointer.wheel', deltaX: e.deltaX, deltaY: e.deltaY, ...p }); }} onKeyDown={e => { if (e.key === 'Escape') { setControl(false); e.preventDefault(); return; } if (!control || !focused) return; e.preventDefault(); const now = Date.now(); if (e.repeat && now - (keyRepeatTimes.current.get(e.code) || 0) < 35) return; keyRepeatTimes.current.set(e.code, now); heldKeys.current.set(e.code, { key: e.key, code: e.code }); send({ type: 'key', key: e.key, code: e.code, down: true, ctrlKey: e.ctrlKey, shiftKey: e.shiftKey, altKey: e.altKey, metaKey: e.metaKey }); }} onKeyUp={e => { if (!control || !focused) return; e.preventDefault(); heldKeys.current.delete(e.code); keyRepeatTimes.current.delete(e.code); send({ type: 'key', key: e.key, code: e.code, down: false, ctrlKey: e.ctrlKey, shiftKey: e.shiftKey, altKey: e.altKey, metaKey: e.metaKey }); }}>
       {frame ? <img ref={image} src={frame.dataUrl} alt={`Remote desktop of ${session.device.name}`} draggable={false} /> : <div className="stream-loading"><div className="stream-orbit"><BrandMark /></div><h3>{sessionEnded ? 'This session has ended.' : frameError ? 'Waiting for the remote desktop' : 'Bringing your desktop into view'}</h3><p>{frameError || 'Establishing a screen stream over your private connection…'}</p><>{sessionEnded ? <p className="session-ended-help">{popout ? 'Close this screen, then choose Connect in the main window to start a new session.' : 'Choose Disconnect, then Connect to start a new session. Orbit will not reconnect to this ended session.'}</p> : <Loader2 className="spin" size={20} />}</></div>}
-    </div></SessionHud><div className="session-statusbar"><LinkStatus ended={sessionEnded} link={frame?.link || session.link} code={securityCode(session.device.fingerprint || session.device.serverFingerprint)} /><span>{frame ? `${frame.width} × ${frame.height}` : 'Waiting for display'}<span className="status-separator">·</span>{sessionEnded ? 'Explicit Connect required' : lastFrameAt ? 'Image stream' : 'Connecting'}<span className="status-separator">·</span>{control && focused ? 'Keyboard captured' : 'Local keyboard'}</span></div>
+    </div></SessionHud><div className="session-statusbar"><LinkStatus ended={sessionEnded} link={frame?.link || session.link} code={securityCode(session.device.fingerprint || session.device.serverFingerprint)} /><span>{frame ? `${frame.width} × ${frame.height}` : 'Waiting for display'}<span className="status-separator">·</span>{sessionEnded ? 'Explicit Connect required' : frameDelivery.unchanged ? 'Idle screen · 0 KB' : lastFrameAt ? 'Image stream' : 'Connecting'}<span className="status-separator">·</span>{control && focused ? 'Keyboard captured' : 'Local keyboard'}</span></div>
     {tool && <Modal title={tool === 'clipboard' ? 'A little copy. A little paste.' : tool === 'files' ? 'Files, within reach.' : 'Host power controls'} subtitle={tool === 'clipboard' ? 'Explicitly read or write the remote computer’s text clipboard.' : tool === 'files' ? 'Transfers are confined to the remote host’s shared folder.' : 'These actions affect the remote computer. Save any work first.'} onClose={() => setTool(null)} wide={tool === 'files'}>
       {toolError && <div className="inline-error" role="alert">{toolError}</div>}
       {tool === 'clipboard' && <><label className="field-label" htmlFor="clipboard-content">CLIPBOARD TEXT</label><textarea id="clipboard-content" className="join-code" value={clipboardText} onChange={e => setClipboardText(e.target.value)} placeholder="Read the remote clipboard, or type text to send…" rows={7} /><div className="modal-footer"><button className="button secondary" disabled={toolBusy} onClick={() => void clipboard('read')}><Download size={15} /> Read remote</button><button className="button primary" disabled={toolBusy} onClick={() => void clipboard('write')}><Upload size={15} /> Send to remote</button></div></>}

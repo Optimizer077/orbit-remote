@@ -6,6 +6,16 @@ const net = require('node:net');
 const crypto = require('node:crypto');
 
 const MAX_RESPONSE = 24 * 1024 * 1024;
+// Matches maxTransferBytes in src/Orbit.Host/Program.cs: the host lists, serves and accepts files up to this size.
+const MAX_TRANSFER_BYTES = 32 * 1024 * 1024;
+const TRANSFER_IDLE_MS = 30000;
+
+// File transfers get the normal 15 s budget plus one second per 64 KiB (a slow relayed link),
+// capped at 10 minutes. Normal API calls keep the fixed 15 s deadline.
+function transferDeadline(bytes) {
+  const size = Number.isFinite(bytes) && bytes > 0 ? bytes : 0;
+  return Math.min(15000 + Math.ceil(size / (64 * 1024)) * 1000, 10 * 60 * 1000);
+}
 
 // Orbit's link policy, matching Security.IsStrongTls on the host: TLS 1.3, or TLS 1.2
 // with ECDHE key exchange and AEAD ciphers. Every allowed suite is forward secret and
@@ -127,7 +137,8 @@ class PinnedAgent extends https.Agent {
 }
 
 function request(options) {
-  const { url, method = 'GET', body, headers = {}, agent, maxBytes = MAX_RESPONSE, timeout = 15000 } = options;
+  const { url, method = 'GET', body, headers = {}, agent, maxBytes = MAX_RESPONSE, timeout = 15000,
+    idleTimeout = timeout, tooLargeMessage = 'Response exceeds the application size limit.' } = options;
   // 304 is only a success for a request that actually asked a conditional question.
   const conditional = Object.keys(headers).some(name => name.toLowerCase() === 'if-none-match');
   return new Promise((resolve, reject) => {
@@ -142,7 +153,7 @@ function request(options) {
       let bytes = 0;
       response.on('data', chunk => {
         bytes += chunk.length;
-        if (bytes > maxBytes) { response.destroy(new Error('Response exceeds the application size limit.')); return; }
+        if (bytes > maxBytes) { response.destroy(new Error(tooLargeMessage)); return; }
         chunks.push(chunk);
       });
       response.on('error', reject);
@@ -165,7 +176,7 @@ function request(options) {
         resolve({ json, buffer, headers: response.headers, status: response.statusCode, link });
       });
     });
-    req.setTimeout(timeout, () => req.destroy(new Error('Device request timed out.')));
+    req.setTimeout(idleTimeout, () => req.destroy(new Error('Device request timed out.')));
     const deadline = setTimeout(() => req.destroy(new Error('Device request deadline exceeded.')), timeout);
     req.once('close', () => clearTimeout(deadline));
     req.on('error', reject);
@@ -181,4 +192,5 @@ async function remoteRequest(device, identity, route, options = {}, allowLoopbac
   finally { agent.destroy(); }
 }
 
-module.exports = { normalizeFingerprint, validateAddress, parseInvite, PinnedAgent, request, remoteRequest, describeLink };
+module.exports = { normalizeFingerprint, validateAddress, parseInvite, PinnedAgent, request, remoteRequest, describeLink,
+  transferDeadline, MAX_TRANSFER_BYTES, TRANSFER_IDLE_MS };

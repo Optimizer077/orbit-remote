@@ -8,6 +8,7 @@ const { spawn, execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const { OrbitController } = require('./controller.cjs');
 const { createMacPermissionSetup } = require('./mac-permissions.cjs');
+const { ChildProofAgent, findTailscaleCli } = require('./local-control.cjs');
 
 let mainWindow, tray, hostProcess, controller, showMacPermissionSetup;
 const viewerWindows = new Map();
@@ -18,7 +19,6 @@ let quitting = false;
 let restartTimer, healthTimer, healthBusy = false, restartAttempts = 0;
 const appRoot = path.resolve(__dirname, '..');
 const workspaceRoot = path.resolve(appRoot, '..', '..');
-const controlToken = crypto.randomBytes(32).toString('base64url');
 const controlPort = Number(process.env.ORBIT_CONTROL_PORT || 47831);
 const allowLoopback = process.env.ORBIT_LOOPBACK_TEST === '1';
 const rendererUrl = process.env.ORBIT_RENDERER_URL;
@@ -44,6 +44,9 @@ else {
 }
 
 function startHost(dataDirectory) {
+  controller.clearLocalControl();
+  const controlToken = crypto.randomBytes(32).toString('base64url');
+  const proofKey = crypto.randomBytes(32).toString('base64url');
   const published = path.join(process.resourcesPath, 'host', process.platform === 'win32' ? 'Orbit.Host.exe' : 'Orbit.Host');
   const development = path.join(workspaceRoot, 'src', 'Orbit.Host', 'bin', 'Debug', 'net10.0', 'Orbit.Host.dll');
   const nativeRuntime = ({ win32: 'win', darwin: 'osx', linux: 'linux' })[process.platform] + '-' + process.arch;
@@ -55,15 +58,20 @@ function startHost(dataDirectory) {
   const child = spawn(executable, args, {
     cwd: app.isPackaged ? path.dirname(published) : appRoot, windowsHide: true,
     env: { ...process.env, ORBIT_CONTROL_TOKEN: controlToken, ORBIT_DATA_DIR: path.join(dataDirectory, 'host'),
-      ORBIT_CONTROL_PORT: String(controlPort), ORBIT_PARENT_WATCH: '1' },
+      ORBIT_CONTROL_PORT: String(controlPort), ORBIT_PARENT_WATCH: '1', ORBIT_PARENT_PROOF: '1' },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   hostProcess = child;
   const log = fs.createWriteStream(path.join(dataDirectory, 'host.log'), { flags: 'a', mode: 0o600 });
   child.stdout.pipe(log, { end: false }); child.stderr.pipe(log, { end: false });
   child.stdin.on('error', () => {});
+  if (child.pid) {
+    controller.setLocalControl(new ChildProofAgent({ proofKey, pid: child.pid, port: controlPort }), controlToken);
+    child.stdin.write(JSON.stringify({ version: 1, proofKey }) + '\n');
+  }
   child.once('error', error => log.write(error.message + '\n'));
   child.once('exit', () => {
+    if (hostProcess === child) controller.clearLocalControl();
     if (!quitting && mainWindow && !restartTimer) {
       restartAttempts++;
       restartTimer = setTimeout(() => {
@@ -80,7 +88,7 @@ async function start() {
   const directory = process.env.ORBIT_APP_DATA || app.getPath('userData');
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   controller = new OrbitController({
-    directory, controlToken, controlUrl: 'http://127.0.0.1:' + controlPort, allowLoopback,
+    directory, requireLocalProof: true, controlUrl: 'http://127.0.0.1:' + controlPort, allowLoopback,
     native: {
       getSettings: () => ({ startAtLoginSupported: app.isPackaged && !process.env.PORTABLE_EXECUTABLE_FILE && ['win32', 'darwin'].includes(process.platform),
         startAtLogin: app.isPackaged && !process.env.PORTABLE_EXECUTABLE_FILE && ['win32', 'darwin'].includes(process.platform) ?
@@ -124,7 +132,8 @@ async function start() {
       if (action === 'viewer.context') {
         const s = controller.getSession(viewer);
         return { session: { sessionId: viewer.sessionId, device: { id: s.device.id, name: s.device.name,
-          platform: s.device.platform, direction: 'outgoing' }, viewOnly: s.viewOnly, permissions: s.permissions }, monitorId: viewer.monitorId };
+          platform: s.device.platform, direction: 'outgoing' }, viewOnly: s.viewOnly, permissions: s.permissions,
+          canScaleFrames: s.canScaleFrames, canConditionalFrames: s.canConditionalFrames }, monitorId: viewer.monitorId };
       }
       if (action === 'viewer.close') { viewer.window.close(); return { ok: true }; }
       if (action !== 'clipboard.local.write' && payload.sessionId !== viewer.sessionId) throw new Error('This screen belongs to another session.');
@@ -134,7 +143,14 @@ async function start() {
       if (action === 'viewer.open') return openViewer(payload);
       if (action.startsWith('viewer.')) throw new Error('This action is only available inside a screen window.');
     }
-    try { return await controller.invoke(action, payload); }
+    try {
+      const result = await controller.invoke(action, payload);
+      if (action === 'status') observeIncoming(result);
+      else if (['host.disconnect-all', 'session.end', 'device.revoke'].includes(action)) {
+        observeIncoming(await controller.local('status'));
+      }
+      return result;
+    }
     finally {
       // Owner disconnection also closes screens whose session was removed by forget.
       for (const entry of viewerWindows.values()) if (!controller.sessions.has(entry.sessionId)) entry.window.close();
@@ -156,14 +172,27 @@ async function start() {
     healthBusy = true;
     try {
       const status = await controller.local('status');
+      observeIncoming(status);
       restartAttempts = 0;
-      if (!allowLoopback && !status.remoteEnabled && status.transport?.executable) {
-        const { stdout } = await promisify(execFile)(status.transport.executable, ['status', '--json'], { timeout: 5000, maxBuffer: 4 * 1024 * 1024, windowsHide: true });
+      const tailscaleCli = findTailscaleCli();
+      if (!allowLoopback && !status.remoteEnabled && tailscaleCli) {
+        const { stdout } = await promisify(execFile)(tailscaleCli, ['status', '--json'], { timeout: 5000, maxBuffer: 4 * 1024 * 1024, windowsHide: true });
         if (JSON.parse(stdout).BackendState === 'Running') hostProcess.stdin.end();
       }
     } catch { /* the next health tick or child exit restarts recovery */ }
     finally { healthBusy = false; }
-  }, 10000);
+  }, 3000);
+}
+
+let incomingSignature = '';
+function observeIncoming(status) {
+  const incoming = (status?.sessions || []).filter(s => s.direction !== 'outgoing');
+  const signature = JSON.stringify(incoming.map(s => [s.id, s.permissions?.control === true]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
+  updateTrayActivity(trayActivityFromStatus(status));
+  if (signature !== incomingSignature) {
+    incomingSignature = signature;
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('orbit:incoming-changed');
+  }
 }
 
 function createWindow() {
@@ -235,19 +264,103 @@ function openViewer(payload) {
   return { ok: true };
 }
 
+// Tray "being viewed" state. trayBaseImage is the plain icon; badged variants are drawn once per colour and cached.
+let trayBaseImage, trayActivity = { viewing: 0, controlling: false };
+const trayBadgeCache = new Map();
+const TRAY_IDLE_TOOLTIP = 'Orbit Remote — private remote access';
+const TRAY_BADGE_RGB = { viewing: [245, 158, 11], controlling: [229, 57, 53] }; // amber: viewed · red: controlled
+
 function createTray() {
   const trayName = process.platform === 'darwin' ? 'trayTemplate.png' : 'tray.png';
   const image = nativeImage.createFromPath(app.isPackaged ? path.join(process.resourcesPath, 'icons', trayName) : path.join(appRoot, 'build', 'icons', trayName));
   if (process.platform === 'darwin') image.setTemplateImage(true);
+  trayBaseImage = image;
   tray = new Tray(image);
-  tray.setToolTip('Orbit Remote — private remote access');
-  tray.setContextMenu(Menu.buildFromTemplate([
+  tray.setToolTip(TRAY_IDLE_TOOLTIP);
+  tray.setContextMenu(buildTrayMenu());
+  tray.on('double-click', () => { mainWindow.show(); mainWindow.focus(); });
+}
+
+function buildTrayMenu() {
+  const { viewing } = trayActivity;
+  return Menu.buildFromTemplate([
+    ...(viewing > 0 ? [{ label: trayActivityText(trayActivity), enabled: false }, { type: 'separator' }] : []),
     { label: 'Open Orbit Remote', click: () => { mainWindow.show(); mainWindow.focus(); } },
     ...(process.platform === 'darwin' ? [{ label: 'Set Up Mac Permissions…', click: () => openMacPermissionSetup() }] : []),
-    { label: 'Disconnect all incoming sessions', click: async () => { try { await controller.local('disconnect-all', 'POST'); } catch (error) { dialog.showErrorBox('Disconnect failed', error.message); } } },
+    { label: viewing > 0 ? `Disconnect all incoming sessions (${viewing})` : 'Disconnect all incoming sessions', click: async () => {
+      try { await controller.invoke('host.disconnect-all'); observeIncoming(await controller.local('status')); }
+      catch (error) { dialog.showErrorBox('Disconnect failed', error.message); }
+    } },
     { type: 'separator' }, { label: 'Quit Orbit and stop remote access', click: () => app.quit() },
-  ]));
-  tray.on('double-click', () => { mainWindow.show(); mainWindow.focus(); });
+  ]);
+}
+
+function trayActivityText({ viewing, controlling }) {
+  return `${viewing === 1 ? '1 device' : `${viewing} devices`} viewing this computer${controlling ? ' (1 has control)' : ''}`;
+}
+
+/** Incoming-session summary from either the raw host status (controller.local('status')) or controller.status(). */
+function trayActivityFromStatus(status) {
+  const incoming = (Array.isArray(status?.sessions) ? status.sessions : []).filter(s => s && s.direction !== 'outgoing');
+  return { viewing: incoming.length, controlling: incoming.some(s => s.permissions?.control === true) };
+}
+
+/** Paints a filled dot with a transparent cut-out ring into the bottom-right of a BGRA (premultiplied) bitmap. */
+function paintTrayBadge(bitmap, width, height, scale, [r, g, b]) {
+  const out = Buffer.from(bitmap);
+  const radius = 3.1 * scale, ring = radius + 1.3 * scale;
+  const cx = width - radius - 0.4 * scale, cy = height - radius - 0.4 * scale;
+  for (let y = Math.max(0, Math.floor(cy - ring - 1)); y < height; y++) {
+    for (let x = Math.max(0, Math.floor(cx - ring - 1)); x < width; x++) {
+      const d = Math.hypot(x + 0.5 - cx, y + 0.5 - cy), i = (y * width + x) * 4;
+      const clear = Math.min(1, Math.max(0, ring + 0.5 - d)); // 1 inside the ring: erase the icon there
+      const fill = Math.min(1, Math.max(0, radius + 0.5 - d)); // 1 inside the dot
+      if (clear <= 0) continue;
+      for (let c = 0; c < 4; c++) out[i + c] = Math.round(out[i + c] * (1 - clear));
+      if (fill > 0) {
+        const src = [b, g, r, 255];
+        for (let c = 0; c < 4; c++) out[i + c] = Math.round(src[c] * fill + out[i + c] * (1 - fill));
+      }
+    }
+  }
+  return out;
+}
+
+function badgedTrayImage(kind) {
+  if (trayBadgeCache.has(kind)) return trayBadgeCache.get(kind);
+  const result = nativeImage.createEmpty();
+  const dip = trayBaseImage.getSize();
+  const scales = typeof trayBaseImage.getScaleFactors === 'function' ? trayBaseImage.getScaleFactors() : [1];
+  for (const scaleFactor of scales.length ? scales : [1]) {
+    const bitmap = trayBaseImage.toBitmap({ scaleFactor });
+    const width = Math.round(dip.width * scaleFactor), height = Math.round(dip.height * scaleFactor);
+    if (!bitmap.length || width * height * 4 !== bitmap.length) continue;
+    const painted = paintTrayBadge(bitmap, width, height, scaleFactor, TRAY_BADGE_RGB[kind]);
+    const png = nativeImage.createFromBitmap(painted, { width, height, scaleFactor }).toPNG({ scaleFactor });
+    result.addRepresentation({ scaleFactor, width, height, buffer: png });
+  }
+  const image = result.isEmpty() ? trayBaseImage : result;
+  trayBadgeCache.set(kind, image);
+  return image;
+}
+
+/**
+ * Shows that another device is viewing or controlling THIS computer: badged tray icon (Windows/Linux) or a
+ * "●" title (macOS, whose template icons are monochrome), a tooltip, and a status line in the tray menu.
+ * Call with trayActivityFromStatus(status) whenever host status is refreshed. Cheap when nothing changed.
+ */
+function updateTrayActivity({ viewing = 0, controlling = false } = {}) {
+  viewing = Math.max(0, Math.floor(Number(viewing) || 0));
+  controlling = viewing > 0 && controlling === true;
+  if (!tray || tray.isDestroyed() || !trayBaseImage) return;
+  if (viewing === trayActivity.viewing && controlling === trayActivity.controlling) return;
+  trayActivity = { viewing, controlling };
+  try {
+    if (process.platform === 'darwin') tray.setTitle(viewing > 0 ? (viewing > 1 ? `● ${viewing}` : '●') : '');
+    else tray.setImage(viewing > 0 ? badgedTrayImage(controlling ? 'controlling' : 'viewing') : trayBaseImage);
+  } catch { /* the tooltip and menu below still report the state */ }
+  tray.setToolTip(viewing > 0 ? `Orbit Remote: ${trayActivityText(trayActivity)}` : TRAY_IDLE_TOOLTIP);
+  tray.setContextMenu(buildTrayMenu());
 }
 
 function openMacPermissionSetup() {

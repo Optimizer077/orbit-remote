@@ -1,6 +1,6 @@
 import type { CSSProperties, ReactNode } from 'react';
 import {
-  Activity, ArrowDownLeft, ArrowRight, ArrowUpRight, Command, Copy, Ellipsis, Eye,
+  Activity, ArrowDownLeft, ArrowRight, ArrowUpRight, Clipboard, Command, Copy, Ellipsis, Eye, FolderOpen, MousePointer2,
   FileDown, FileUp, Fingerprint, FlaskConical, Globe2, Link2, Loader2, LockKeyhole,
   Monitor, MonitorUp, Plus, Power, Settings2, ShieldAlert, ShieldCheck, Terminal, Unplug,
 } from 'lucide-react';
@@ -14,6 +14,7 @@ export type OverviewProps = {
   devices: Device[];
   activity: AuditEntry[];
   sessionsCount: number;
+  sessions?: readonly SessionEntry[];
   connecting: string | null;
   loading?: boolean;
   onAddDevice(): void;
@@ -67,10 +68,13 @@ function greeting() {
 
 function plural(count: number, word: string) { return `${count} ${word}${count === 1 ? '' : 's'}`; }
 
-function permissionSummary(permissions?: Partial<Permissions>) {
-  const granted = PERMISSION_LABELS.filter(([key]) => permissions?.[key]).map(([, label]) => label);
-  if (!granted.length) return '';
-  return granted.length === 1 && granted[0] === 'View' ? 'View only' : granted.join(' · ');
+function PermissionChips({ device }: { device: Device }) {
+  const icons = { view: Eye, control: MousePointer2, clipboard: Clipboard, files: FolderOpen, power: Power };
+  return <div className="ov-permission-chips" role="group" aria-label={`Permissions for ${device.name}`}>{PERMISSION_LABELS.map(([key, label]) => {
+    const granted = device.permissions?.[key] === true;
+    const Icon = icons[key];
+    return <span key={key} className={`ov-permission-chip ${granted ? 'is-granted' : ''}`} data-permission={key} data-granted={granted} aria-label={`${label}: ${granted ? 'Granted' : 'Not granted'}`}><Icon size={14} aria-hidden="true" /><b>{label}</b><small>{granted ? 'Granted' : 'Not granted'}</small></span>;
+  })}</div>;
 }
 
 // Friendly wording for the host's audit actions (see HostState.AddAudit). Unknown actions fall back to a readable form.
@@ -108,26 +112,27 @@ function Tile({ label, icon: Icon, tone, state, index, children, busy }: { label
   </section>;
 }
 
-function DeviceCard({ device, index, connecting, onConnect, onManage }: { device: Device; index: number; connecting: string | null; onConnect: OverviewProps['onConnect']; onManage: OverviewProps['onManage'] }) {
+function DeviceCard({ device, index, connecting, inSession, onConnect, onManage, onJoin }: { device: Device; index: number; connecting: string | null; inSession: boolean; onConnect: OverviewProps['onConnect']; onManage: OverviewProps['onManage']; onJoin: OverviewProps['onJoin'] }) {
   const incoming = device.direction === 'incoming';
   const online = device.online === true ? 'ok' : device.online === false ? 'off' : 'info';
   const busy = connecting === device.id;
-  const blocked = connecting !== null || !device.address;
-  const perms = permissionSummary(device.permissions);
+  const revoked = device.revoked === true || device.status === 'revoked';
+  const blocked = connecting !== null || !device.address || revoked;
   const paired = shortDate(device.pairedAt);
-  return <article className={`ov-device ov-rise ${device.online === true ? 'is-online' : ''}`} style={rise(index)} aria-label={device.name}>
+  return <article className={`ov-device ov-rise ${device.online === true ? 'is-online' : ''} ${inSession ? 'is-in-session' : ''}`} style={rise(index)} aria-label={device.name} data-session-state={inSession ? 'active' : 'idle'} data-direction={device.direction || 'outgoing'}>
     <div className="ov-device-top">
       <span className="ov-device-icon" aria-hidden="true"><PlatformIcon platform={device.platform} size={22} /></span>
       <div className="ov-device-name"><h3 title={device.name}>{device.name}</h3><span>{platformName(device.platform)}{paired && ` · paired ${paired}`}</span></div>
       <button type="button" className="ov-icon-btn" aria-label={`Manage ${device.name}`} title="Details, security code and access" onClick={() => onManage(device)}><Ellipsis size={19} /></button>
     </div>
     <div className="ov-device-facts">
-      <State tone={online}>{device.online === true ? 'Online' : device.online === false ? 'Offline' : 'Not checked'}</State>
+      <State tone={inSession ? 'ok' : online}>{revoked ? 'Access revoked' : inSession ? 'In session' : device.online === true ? 'Online' : device.online === false ? 'Offline' : 'Not checked'}</State>
       <span className="ov-direction">{incoming ? <ArrowDownLeft size={14} aria-hidden="true" /> : <ArrowUpRight size={14} aria-hidden="true" />}{incoming ? 'Can access this host' : 'You connect to it'}</span>
     </div>
-    {perms && <p className="ov-device-perms" title={incoming ? 'What this device may do on this computer' : 'What that computer allows you to do'}>Access: <b>{perms}</b></p>}
+    {revoked && <p className="ov-device-revoked">{device.statusReason || 'Access revoked by the host.'} Join a new invitation to pair again.</p>}
+    <PermissionChips device={device} />
     <div className="ov-device-actions">
-      {incoming ? <span className="ov-device-note">To open its desktop, join an invite created on it.</span> : <>
+      {revoked ? <><button className="ov-btn ov-secondary ov-small" onClick={() => onManage(device)}>Forget connection</button><button className="ov-btn ov-primary ov-small" onClick={onJoin}>Pair again</button></> : incoming ? <span className="ov-device-note">To open its desktop, join an invite created on it.</span> : <>
         <button type="button" className="ov-btn ov-primary ov-small" aria-label={`Connect to ${device.name}`} disabled={blocked} title={!device.address ? 'This device has no saved address yet.' : undefined} onClick={() => onConnect(device, false)}>
           {busy ? <Loader2 size={14} className="spin" aria-hidden="true" /> : <MonitorUp size={15} aria-hidden="true" />}{busy ? 'Connecting…' : 'Connect'}</button>
         <button type="button" className="ov-btn ov-secondary ov-small" aria-label={`View only, ${device.name}`} disabled={blocked} onClick={() => onConnect(device, true)}><Eye size={15} aria-hidden="true" />View only</button>
@@ -137,7 +142,7 @@ function DeviceCard({ device, index, connecting, onConnect, onManage }: { device
 }
 
 export function Overview(props: OverviewProps) {
-  const { status, devices, activity, sessionsCount, connecting, loading = false, onAddDevice, onJoin, onConnect, onManage, onNavigate, onCopyAddress } = props;
+  const { status, devices, activity, sessionsCount, connecting, sessions: providedSessions, loading = false, onAddDevice, onJoin, onConnect, onManage, onNavigate, onCopyAddress } = props;
   const host = status?.host;
   const tailscale = host?.tailscale;
   const testMode = host?.testMode === true;
@@ -164,7 +169,7 @@ export function Overview(props: OverviewProps) {
     : tailscale?.available ? { tone: 'warn', state: 'Not connected', title: 'Tailscale is off', body: tailscale.error || 'Sign in to Tailscale on this computer so your devices can reach it.' }
     : { tone: 'warn', state: 'Not installed', title: 'Tailscale needed', body: 'Install Tailscale to create the private network Orbit connects through.' };
 
-  const sessions = (status?.sessions || []) as SessionEntry[];
+  const sessions: readonly SessionEntry[] = providedSessions || status?.sessions || [];
   const incomingSessions = sessions.filter(s => s.direction === 'incoming').length;
   const outgoingSessions = sessions.filter(s => s.direction === 'outgoing').length;
   const lastSession = activity.find(e => /^session/.test(e.action));
@@ -234,7 +239,7 @@ export function Overview(props: OverviewProps) {
           </div>
         </div>
         : <div className="ov-devices">
-          {shown.map((d, i) => <DeviceCard key={d.id} device={d} index={4 + i} connecting={connecting} onConnect={onConnect} onManage={onManage} />)}
+          {shown.map((d, i) => <DeviceCard key={`${d.direction || 'outgoing'}-${d.id}`} device={d} index={4 + i} connecting={connecting} inSession={sessions.some(session => session.deviceId === d.id && session.direction === (d.direction || 'outgoing'))} onConnect={onConnect} onManage={onManage} onJoin={onJoin} />)}
           <button type="button" className={['ov-pair-card ov-rise', ...[2, 3, 4].filter(n => shown.length % n === 0).map(n => `fills-${n}`)].join(' ')} style={rise(4 + shown.length)} onClick={onAddDevice}>
             <span className="ov-pair-plus" aria-hidden="true"><Plus size={20} /></span><span className="ov-pair-text"><strong>Pair another computer</strong><span>Create an invite here, paste it there.</span></span>
           </button>

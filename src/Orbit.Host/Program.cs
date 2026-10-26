@@ -20,6 +20,8 @@ if (string.IsNullOrWhiteSpace(controlToken) || controlToken.Length < 32)
     return 2;
 }
 var loopbackTest = args.Contains("--loopback-test", StringComparer.Ordinal);
+using var parentProof = Environment.GetEnvironmentVariable("ORBIT_PARENT_PROOF") == "1"
+    ? await ParentProof.ReadBootstrapAsync(Console.In) : null;
 var network = await TailscaleNetwork.DiscoverAsync(loopbackTest);
 var dataDirectory = Environment.GetEnvironmentVariable("ORBIT_DATA_DIR") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OrbitRemote", "host");
 var state = new HostState(Path.GetFullPath(dataDirectory));
@@ -130,8 +132,11 @@ app.Use(async (context, next) =>
     if (IsLocal(context))
     {
         if (!IPAddress.IsLoopback(context.Connection.RemoteIpAddress ?? IPAddress.None) || context.Request.Host.Host != "127.0.0.1") { context.Response.StatusCode = 403; return; }
-        var authorization = context.Request.Headers.Authorization.ToString();
-        if (!authorization.StartsWith("Bearer ", StringComparison.Ordinal) || !Security.TokenEquals(authorization[7..], controlToken)) { context.Response.StatusCode = 401; return; }
+        if (context.Request.Path != "/api/parent-proof" || parentProof is null)
+        {
+            var authorization = context.Request.Headers.Authorization.ToString();
+            if (!authorization.StartsWith("Bearer ", StringComparison.Ordinal) || !Security.TokenEquals(authorization[7..], controlToken)) { context.Response.StatusCode = 401; return; }
+        }
     }
     else
     {
@@ -167,6 +172,16 @@ app.Use(async (context, next) =>
     }
 });
 app.UseRateLimiter();
+
+app.MapGet("/api/parent-proof", (HttpContext context) =>
+{
+    if (!IsLocal(context) || parentProof is null) return Results.NotFound();
+    var challenges = context.Request.Headers["X-Orbit-Challenge"];
+    if (challenges.Count != 1) return Results.BadRequest(new { error = "One parent challenge is required." });
+    var payload = JsonSerializer.SerializeToUtf8Bytes(parentProof.CreateResponse(challenges.ToString(), context.Connection.LocalPort, context.Connection.RemotePort));
+    context.Response.ContentLength = payload.Length;
+    return Results.Bytes(payload, "application/json");
+});
 
 app.MapGet("/api/status", async (HttpContext context) =>
 {

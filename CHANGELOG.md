@@ -2,6 +2,31 @@
 
 Changes are documented by preview release. Application/package version `0.1.0` identifies the current development line; `v0.1.0-preview.1` identifies its initial preview distribution. The [validation record](docs/VALIDATION.md) is the source for completed checks, and [TODO.md](TODO.md) tracks remaining work.
 
+## 0.1.0-preview.4 — 2026-10-26
+
+### See who is on your computer
+
+- **"Being viewed" banner:** when another device views or controls this computer, a banner names it ("Ali's MacBook is viewing this screen · 4:12"), shows whether it can use your mouse and keyboard, and offers **End session** per session or **Disconnect all**. Multiple sessions from one device are counted accurately.
+- **Tray badge:** the tray icon shows when someone is connected (amber when viewing, red when controlling; macOS shows a menu-bar marker).
+- **Disconnect all** now uses the host's own disconnect, which also stops queued automatic reconnects.
+
+### Clearer devices
+
+- Device cards show **permission chips** (View · Control · Clipboard · Files · Power, each marked granted or "Not granted") and an **In session** state.
+- A device whose access was revoked by its host now says **Access revoked** with **Forget** and **Pair again**, instead of looking "offline".
+- The sidebar uses the real Orbit wordmark.
+
+### Reliability and security
+
+- File transfers up to **32 MiB**, matching the host, with timeouts that grow with file size and a clear message for larger files.
+- The app now **proves the local host is its own child process** before sending it any token: a per-launch secret over the process pipe and a fresh challenge on every local connection, bound to that exact connection. It also finds the Tailscale tool itself instead of running a path reported by the host.
+- Status reports the real listening port.
+
+### Notes
+
+- Windows binaries only; macOS and Linux run from source.
+- Evidence: 211 host checks, 76 desktop checks, 51 UI-lab checks, production build, and the real Windows Electron end-to-end test.
+
 ## 0.1.0-preview.3 — 2026-10-26
 
 ### A new interface

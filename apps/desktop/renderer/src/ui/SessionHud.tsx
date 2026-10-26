@@ -26,15 +26,17 @@ export type FrameStats = {
   fps?: number;
   /** Transfer throughput while fetching (bytes × 8 / ms = kbit/s), EWMA. Only when bytes were recorded. */
   kbps?: number;
+  lastBytes?: number;
+  unchanged?: boolean;
   samples: number;
 };
 
-export type FrameAccumulator = { avgMs?: number; avgGapMs?: number; kbps?: number; lastAt?: number; lastMs?: number; samples: number };
+export type FrameAccumulator = { avgMs?: number; avgGapMs?: number; kbps?: number; lastAt?: number; lastMs?: number; lastBytes?: number; unchanged?: boolean; samples: number };
 
 const ewma = (prev: number | undefined, value: number) => prev === undefined ? value : prev + EWMA_ALPHA * (value - prev);
 
 /** Pure fold of one real measurement into the accumulator. `now` is a monotonic clock in ms. */
-export function foldFrameSample(acc: FrameAccumulator, ms: number, bytes: number | undefined, now: number): FrameAccumulator {
+export function foldFrameSample(acc: FrameAccumulator, ms: number, bytes: number | undefined, now: number, unchanged = false): FrameAccumulator {
   if (!Number.isFinite(ms) || ms < 0) return acc;
   const gap = acc.lastAt === undefined ? undefined : now - acc.lastAt;
   return {
@@ -43,20 +45,22 @@ export function foldFrameSample(acc: FrameAccumulator, ms: number, bytes: number
     kbps: bytes !== undefined && Number.isFinite(bytes) && bytes >= 0 && ms > 0 ? ewma(acc.kbps, (bytes * 8) / ms) : acc.kbps,
     lastAt: now,
     lastMs: ms,
+    lastBytes: bytes,
+    unchanged,
     samples: acc.samples + 1,
   };
 }
 
 export function statsFrom(acc: FrameAccumulator): FrameStats {
-  return { lastMs: acc.lastMs, avgMs: acc.avgMs, fps: acc.avgGapMs ? 1000 / acc.avgGapMs : undefined, kbps: acc.kbps, samples: acc.samples };
+  return { lastMs: acc.lastMs, avgMs: acc.avgMs, fps: acc.avgGapMs ? 1000 / acc.avgGapMs : undefined, kbps: acc.kbps, lastBytes: acc.lastBytes, unchanged: acc.unchanged, samples: acc.samples };
 }
 
 /** Collects real frame timings. Call record(durationMs, bytes?) after each successful frame fetch; reset() on monitor switch or new session. */
 export function useFrameStats() {
   const acc = useRef<FrameAccumulator>({ samples: 0 });
   const [stats, setStats] = useState<FrameStats>({ samples: 0 });
-  const record = useCallback((ms: number, bytes?: number) => {
-    const next = foldFrameSample(acc.current, ms, bytes, performance.now());
+  const record = useCallback((ms: number, bytes?: number, unchanged = false) => {
+    const next = foldFrameSample(acc.current, ms, bytes, performance.now(), unchanged);
     if (next === acc.current) return;
     acc.current = next;
     setStats(statsFrom(next));
@@ -191,6 +195,7 @@ function QualityMeter({ stats, paused, initialOpen }: { stats: FrameStats; pause
       <span className="hud-tip-row"><span>Last update</span><b>{fmtMs(stats.lastMs)}</b></span>
       <span className="hud-tip-row"><span>Average</span><b>{fmtMs(stats.avgMs)}</b></span>
       <span className="hud-tip-row"><span>Update rate</span><b>{fmtRate(stats.fps)}</b></span>
+      <span className="hud-tip-row"><span>Last image transfer</span><b>{stats.lastBytes === undefined ? 'Not measured' : stats.unchanged ? 'Unchanged · 0 B' : `${(stats.lastBytes / 1024).toFixed(1)} KB`}</b></span>
       <span className="hud-tip-row"><span title="Image bytes divided by the whole request time, including latency. Not a measure of link bandwidth.">Image throughput</span><b>{fmtKbps(stats.kbps)}</b></span>
       <span className="hud-tip-foot">Rated on the average update time<span className="hud-tip-scale">Good &lt; {goodMs} ms · Fair &lt; {fairMs} ms · Slow ≥ {fairMs} ms</span></span>
     </span>

@@ -129,6 +129,20 @@ test('real desktop host: onboarding, pairing, native frames, settings and revoca
     expect(frame.dataUrl.startsWith('data:image/png;base64,')).toBe(true);
     expect(frame.width).toBeGreaterThan(0);
     expect(frame.height).toBeGreaterThan(0);
+    expect(frame.bytes).toBeGreaterThan(0);
+    expect(typeof frame.unchanged).toBe('boolean');
+    if (session.canScaleFrames) {
+      const scaled = await invoke<any>('session.frame', { sessionId: session.sessionId, scale: 0.5 });
+      expect(scaled.width).toBe(frame.width);
+      expect(scaled.height).toBe(frame.height);
+      expect(scaled.encodedWidth).toBe(Math.max(1, Math.round(frame.width * 0.5)));
+      expect(scaled.encodedHeight).toBe(Math.max(1, Math.round(frame.height * 0.5)));
+      expect(scaled.scale).toBe(0.5);
+    }
+    const viewedBanner = page.getByRole('region', { name: 'Remote access to this computer', exact: true });
+    await expect(viewedBanner).toBeVisible();
+    await expect(viewedBanner).toContainText('is viewing this screen');
+    await expect(viewedBanner).toContainText('It cannot use your mouse or keyboard.');
     // Encryption shown to people is measured on the real TLS socket to the real host.
     // Policy allows TLS 1.2 (ECDHE + AEAD) because .NET on macOS may not serve TLS 1.3.
     expect(session.link).toMatchObject({ protocol: expect.stringMatching(/^TLS 1\.[23]$/), forwardSecrecy: true });
@@ -137,11 +151,21 @@ test('real desktop host: onboarding, pairing, native frames, settings and revoca
     // Self-pairing: this computer's security code must equal the code shown for the paired device.
     const expectedCode = outgoing.fingerprint.slice(0, 32).match(/.{4}/g).join(' ');
     await page.getByRole('button', { name: 'Overview', exact: true }).click();
+    await expect(page.locator('.ov-device[data-session-state="active"]')).toHaveCount(2);
+    for (const direction of ['incoming', 'outgoing']) {
+      const card = page.locator(`.ov-device[data-direction="${direction}"]`);
+      await expect(card).toContainText('In session');
+      await expect(card.locator('[data-permission]')).toHaveCount(5);
+      await expect(card.locator('[data-granted="true"]')).toHaveCount(1);
+      await expect(card.locator('[data-granted="false"]')).toHaveCount(4);
+    }
     await expect(page.locator('.host-details .security-code')).toHaveText(expectedCode);
     await page.getByRole('button', { name: 'Manage Orbit workstation', exact: true }).first().click();
     await expect(page.locator('.security-code-card code')).toHaveText(expectedCode);
     await page.getByRole('button', { name: 'Close dialog' }).click();
-    await page.getByRole('button', { name: /^Devices/ }).click();
+    await page.getByRole('navigation', { name: 'Main navigation' }).getByRole('button', { name: /^Devices/ }).click();
+    await expect(page.locator('.op-device-card[data-session-state="active"]')).toHaveCount(2);
+    await expect(page.locator('.op-device-card [data-permission]')).toHaveCount(10);
     const primaryMonitor = session.monitors.find((monitor: any) => monitor.primary) || session.monitors[0];
     expect(primaryMonitor?.id).toBeTruthy();
     const openScreen = async () => {
@@ -169,6 +193,7 @@ test('real desktop host: onboarding, pairing, native frames, settings and revoca
     expect(context.session.viewOnly).toBe(true);
     await expect(screenInvoke('devices')).rejects.toThrow(/cannot perform that action/);
     await expect(screenInvoke('session.end', { sessionId: session.sessionId })).rejects.toThrow(/cannot perform that action/);
+    await expect(screenInvoke('host.disconnect-all')).rejects.toThrow(/cannot perform that action/);
     await expect(screenInvoke('session.frame', { sessionId: 'another-session', monitorId: primaryMonitor.id })).rejects.toThrow(/another session/);
     await expect(screenInvoke('session.frame', { sessionId: session.sessionId, monitorId: 'another-monitor' })).rejects.toThrow(/another remote monitor/);
     const closedScreen = screen.waitForEvent('close');
@@ -207,7 +232,8 @@ test('real desktop host: onboarding, pairing, native frames, settings and revoca
     const viewerSide = activeBeforeStop.find((entry: any) => entry.direction === 'outgoing');
     expect(hostSide?.id).toBeTruthy();
     expect(viewerSide?.id).toBeTruthy();
-    await invoke('session.end', { sessionId: hostSide.id });
+    await expect(viewedBanner).toBeVisible();
+    await viewedBanner.getByRole('button', { name: 'End session with Orbit workstation', exact: true }).click();
     await expect(invoke('session.frame', { sessionId: viewerSide.id })).rejects.toThrow(/ended by host/i);
     await expect(page.getByRole('heading', { name: 'This session has ended.', exact: true })).toBeVisible();
     await expect(page.locator('.session-identity')).toContainText('Session ended');
@@ -224,6 +250,20 @@ test('real desktop host: onboarding, pairing, native frames, settings and revoca
     }
     await page.getByRole('button', { name: 'Disconnect', exact: true }).click();
     await expect(page.getByRole('heading', { name: 'No active connection', exact: true })).toBeVisible();
+    // Two sessions from the same device remain two independently stoppable viewers.
+    // Disconnect all uses the host route that also invalidates queued resume authorization.
+    const twoSessions = [];
+    for (let index = 0; index < 2; index++) twoSessions.push(await invoke<any>('session.start', { deviceId: outgoing.id, viewOnly: true }));
+    await expect(viewedBanner.locator('.viewed-count')).toHaveText('2');
+    await viewedBanner.getByRole('button', { name: /^Devices/ }).click();
+    await expect(viewedBanner.getByRole('group', { name: 'Connected devices' }).locator('li')).toHaveCount(2);
+    await viewedBanner.getByRole('button', { name: 'Disconnect all', exact: true }).click();
+    await expect(viewedBanner).toHaveCount(0);
+    for (const ended of twoSessions) {
+      await expect(invoke('session.frame', { sessionId: ended.sessionId })).rejects.toThrow(/ended by host|session has ended/i);
+      await invoke('session.end', { sessionId: ended.sessionId });
+    }
+    await expect.poll(async () => (await invoke<any>('status')).sessions.filter((entry: any) => entry.direction === 'incoming').length).toBe(0);
     await invoke('device.revoke', { deviceId: incoming.id });
     await expect(invoke('session.start', { deviceId: outgoing.id, viewOnly: true })).rejects.toThrow();
     await expect(invoke('pair', { invite: invitation })).rejects.toThrow();

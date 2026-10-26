@@ -39,6 +39,9 @@ export type Device = {
   platform: string;
   address?: string;
   online?: boolean;
+  revoked?: boolean;
+  status?: string;
+  statusReason?: string;
   lastSeen?: string;
   pairedAt?: string;
   direction?: 'incoming' | 'outgoing';
@@ -98,7 +101,7 @@ export type HostStatus = {
   settings: HostSettings;
   limitations?: string[];
   sessionState?: string;
-  sessions?: { id: string; deviceId: string; deviceName?: string; startedAt?: string }[];
+  sessions?: { id: string; deviceId: string; deviceName?: string; startedAt?: string; direction?: 'incoming' | 'outgoing'; permissions?: Partial<Permissions> }[];
 };
 
 export type AuditEntry = {
@@ -112,14 +115,14 @@ export type AuditEntry = {
 };
 
 export type Monitor = { id: string; name: string; width: number; height: number; primary?: boolean };
-export type Session = { sessionId: string; deviceId?: string; startedAt?: string; permissions?: Partial<Permissions>; link?: Link };
+export type Session = { sessionId: string; deviceId?: string; startedAt?: string; permissions?: Partial<Permissions>; link?: Link; canScaleFrames?: boolean; canConditionalFrames?: boolean };
 export type ViewerContext = { session: Session & { device: Device; viewOnly: boolean }; monitorId: string };
-export type Frame = { dataUrl: string; width: number; height: number; link?: Link };
+export type Frame = { dataUrl: string; width: number; height: number; left?: number; top?: number; encodedWidth?: number; encodedHeight?: number; scale?: number; unchanged?: boolean; bytes?: number; link?: Link };
 export type Invite = { invite: string; expiresAt?: string; code?: string };
 
 declare global {
   interface Window {
-    orbit?: { invoke: (action: string, payload?: unknown) => Promise<unknown> };
+    orbit?: { invoke: (action: string, payload?: unknown) => Promise<unknown>; onIncomingChanged?: (callback: () => void) => () => void };
   }
 }
 
@@ -149,9 +152,10 @@ export const api = {
   updatePermissions: (deviceId: string, permissions: Permissions) => invoke('device.permissions', { deviceId, permissions }),
   updateSettings: (settings: HostSettings) => invoke('settings.update', settings),
   start: (deviceId: string, viewOnly: boolean) => invoke<Session>('session.start', { deviceId, viewOnly }),
-  frame: (sessionId: string, monitorId?: string) => invoke<Frame>('session.frame', { sessionId, monitorId }),
+  frame: (sessionId: string, monitorId?: string, scale = 1) => invoke<Frame>('session.frame', { sessionId, monitorId, scale }),
   input: (sessionId: string, event: Record<string, unknown>, monitorId: string | null = null) => invoke('session.input', { sessionId, event, monitorId }),
   end: (sessionId: string) => invoke('session.end', { sessionId }),
+  disconnectIncoming: () => invoke('host.disconnect-all'),
   monitors: async (sessionId: string) => {
     const result = await invoke<Monitor[] | { monitors: Monitor[] }>('session.monitors', { sessionId });
     return Array.isArray(result) ? result : result.monitors || [];

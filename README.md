@@ -8,13 +8,13 @@
   <p>View a screen. Take control with permission. Keep every paired device accountable.</p>
   <p>
     <a href="docs/VALIDATION.md"><img src="https://img.shields.io/badge/status-development_preview-d9c38b?style=flat-square" alt="Status: development preview"></a>
-    <a href="https://github.com/Optimizer077/orbit-remote/releases/tag/v0.1.0-preview.3"><img src="https://img.shields.io/badge/download-Windows_x64-b2e6c5?style=flat-square" alt="Download: Windows x64 preview"></a>
+    <a href="https://github.com/Optimizer077/orbit-remote/releases/tag/v0.1.0-preview.4"><img src="https://img.shields.io/badge/download-Windows_x64-b2e6c5?style=flat-square" alt="Download: Windows x64 preview"></a>
     <a href="docs/ARCHITECTURE.md"><img src="https://img.shields.io/badge/network-Tailscale-aecaff?style=flat-square" alt="Network: Tailscale"></a>
     <a href="docs/ENCRYPTION.md"><img src="https://img.shields.io/badge/encryption-WireGuard_%2B_mutual_TLS-b2e6c5?style=flat-square" alt="Encryption: WireGuard plus mutual TLS, two layers"></a>
     <a href="docs/MACOS.md"><img src="https://img.shields.io/badge/macOS-local_adapter_evidence-d9c38b?style=flat-square" alt="macOS: local adapter evidence; UI v2 and cross-device validation pending"></a>
   </p>
   <p>
-    <a href="https://github.com/Optimizer077/orbit-remote/releases/tag/v0.1.0-preview.3"><strong>Download Windows</strong></a> ·
+    <a href="https://github.com/Optimizer077/orbit-remote/releases/tag/v0.1.0-preview.4"><strong>Download Windows</strong></a> ·
     <a href="docs/MACOS.md">Continue on a Mac</a> ·
     <a href="docs/ARCHITECTURE.md">How it works</a> ·
     <a href="TODO.md">Roadmap</a> ·
@@ -161,7 +161,7 @@ The invitation is a secret for five minutes and works once. The viewer verifies 
 | **View** | See the chosen screen | The default: new invitations are view-only |
 | **Control** | Mouse and keyboard | Also needs **Take control** on the viewer; **Esc** releases it |
 | **Clipboard** | Read and write text | Explicit actions only, never automatic sync |
-| **Files** | Upload and download | One shared folder, no overwrite, 16 MiB per transfer |
+| **Files** | Upload and download | One shared folder, no overwrite, 32 MiB per transfer |
 | **Power** | Lock or restart | Requires Control, and the host's own policy must allow it |
 
 The host enforces every grant on every request, and the owner can revoke a device at any time.
@@ -195,7 +195,7 @@ Read [SECURITY.md](SECURITY.md) before deployment. Report security concerns priv
 
 ### Download for Windows
 
-Get the [preview release](https://github.com/Optimizer077/orbit-remote/releases/tag/v0.1.0-preview.3):
+Get the [preview release](https://github.com/Optimizer077/orbit-remote/releases/tag/v0.1.0-preview.4):
 
 | Download | Use it when |
 |---|---|
@@ -248,7 +248,7 @@ The script detects Apple silicon or Intel and builds a matching host and package
 | Viewing | Real monitors, display selection, fit and 1:1 modes, separate windows for existing host displays, and a floating session bar with a **measured link-quality meter** and a Reconnecting / Ended overlay. |
 | Input | Native keyboard and mouse, explicit **Take control**, bounded queues, and automatic release of held keys. |
 | Sharing | Many viewers, one controller, revocation, and **Disconnect all**. A host-ended session is never auto-resumed. |
-| Clipboard & files | Explicit text clipboard; one chosen transfer folder, no overwrite, 16 MiB per transfer. |
+| Clipboard & files | Explicit text clipboard; one chosen transfer folder, no overwrite, 32 MiB per transfer, with timeouts that scale with file size. |
 | Power | Optional lock and restart, gated by host policy and the device's grant. |
 | Reliability | Host supervision, owner-exit shutdown, and renewal that rechecks identity and permissions. |
 

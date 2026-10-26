@@ -2,9 +2,19 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { request, remoteRequest, parseInvite, validateAddress, normalizeFingerprint } = require('./transport.cjs');
+const { request, remoteRequest, parseInvite, validateAddress, normalizeFingerprint,
+  transferDeadline, MAX_TRANSFER_BYTES, TRANSFER_IDLE_MS } = require('./transport.cjs');
 
 const MIN_FRAME_SCALE = 0.33; // Matches FrameQuality.MinimumScale on the host.
+const tooLarge = name => `${name} is larger than ${MAX_TRANSFER_BYTES / (1024 * 1024)} MiB, Orbit’s transfer limit.`;
+
+// The port the host's remote listener actually uses (ORBIT_REMOTE_PORT), or undefined when it is not listening.
+function remotePort(address) {
+  try {
+    const url = new URL(address);
+    return Number(url.port) || (url.protocol === 'https:' ? 443 : 80);
+  } catch { return undefined; }
+}
 
 // Optional renderer-requested downscale. Absent means lossless full resolution.
 function frameScale(value) {
@@ -28,6 +38,9 @@ class OrbitController {
   constructor(options) {
     this.controlUrl = options.controlUrl || 'http://127.0.0.1:47831';
     this.controlToken = options.controlToken;
+    this.requireLocalProof = options.requireLocalProof === true;
+    this.localAgent = null;
+    this.localGeneration = 0;
     this.directory = options.directory;
     this.allowLoopback = options.allowLoopback === true;
     this.native = options.native || {};
@@ -49,11 +62,27 @@ class OrbitController {
     } catch (error) { if (error.code !== 'ENOENT') throw new Error('Saved device configuration is invalid: ' + error.message); }
   }
   async local(route, method = 'GET', body) {
-    return (await request({ url: new URL('/api/' + route, this.controlUrl), method, body,
-      headers: { authorization: 'Bearer ' + this.controlToken }, maxBytes: 4 * 1024 * 1024 })).json;
+    if (this.requireLocalProof && !this.localAgent) throw new Error('The authenticated background host is not ready.');
+    const generation = this.localGeneration;
+    const result = await request({ url: new URL('/api/' + route, this.controlUrl), method, body, agent: this.localAgent || undefined,
+      headers: { authorization: 'Bearer ' + this.controlToken }, maxBytes: 4 * 1024 * 1024 });
+    if (generation !== this.localGeneration) throw new Error('The background host restarted; retry this operation.');
+    return result.json;
+  }
+  setLocalControl(agent, bearer) {
+    this.localAgent?.destroy(); this.localAgent = agent; this.controlToken = bearer;
+    this.localGeneration++; this.identity = null;
+  }
+  clearLocalControl() {
+    this.setLocalControl(null, null);
   }
   async getIdentity() {
-    if (!this.identity) this.identity = await this.local('client-identity');
+    if (!this.identity) {
+      const generation = this.localGeneration;
+      const identity = await this.local('client-identity');
+      if (generation !== this.localGeneration) throw new Error('The background identity generation changed.');
+      this.identity = identity;
+    }
     return this.identity;
   }
   async save() {
@@ -129,7 +158,7 @@ class OrbitController {
       settings: {
         hostName: raw.hostName, allowControl: true, allowClipboard: !!platform.canClipboard,
         allowFiles: !!raw.settings?.fileTransferEnabled, allowPower: !!raw.settings?.allowRemotePower,
-        fileTransferRoot: raw.settings?.fileTransferRoot || '', listenPort: 47832,
+        fileTransferRoot: raw.settings?.fileTransferRoot || '', listenPort: raw.remoteAddress ? remotePort(raw.remoteAddress) : undefined,
         startAtLogin: !!nativeSettings.startAtLogin, startAtLoginSupported: !!nativeSettings.startAtLoginSupported,
       },
       sessions: [...(raw.sessions || []).map(({ resumeEpoch: _resumeEpoch, ...s }) => ({ ...s, startedAt: s.createdAt, direction: 'incoming' })),
@@ -143,7 +172,8 @@ class OrbitController {
     const incoming = await this.local('peers');
     const peers = Array.isArray(incoming) ? incoming : incoming.devices || incoming.peers || [];
     return { devices: [
-      ...this.connections.map(d => ({ ...d, direction: 'outgoing', online: d.online ?? null, status: d.online === true ? 'online' : d.online === false ? 'offline' : 'unknown' })),
+      ...this.connections.map(d => ({ ...d, direction: 'outgoing', online: d.online ?? null,
+        status: d.revoked === true ? 'revoked' : d.online === true ? 'online' : d.online === false ? 'offline' : 'unknown' })),
       ...peers.filter(p => !p.revokedAt).map(p => ({ id: p.id, name: p.name, platform: 'unknown',
         direction: 'incoming', online: null, status: 'authorized', permissions: p.permissions,
         fingerprint: p.fingerprint, pairedAt: p.createdAt })),
@@ -153,6 +183,7 @@ class OrbitController {
     if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('Invalid application request.');
     switch (action) {
       case 'status': return this.status();
+      case 'host.disconnect-all': await this.local('disconnect-all', 'POST'); return { ok: true };
       case 'app.open-project': await this.native.openProject?.(); return { ok: true };
       case 'clipboard.local.write': {
         if (typeof payload.text !== 'string' || payload.text.length > 16384) throw new Error('Copy text exceeds the clipboard limit.');
@@ -202,10 +233,18 @@ class OrbitController {
           try {
             const info = (await this.remote(device, '/api/info')).json;
             device.online = true;
+            delete device.revoked; delete device.statusReason;
             device.platform = info.platform?.operatingSystem || info.operatingSystem || device.platform;
             device.name = info.hostName || device.name;
+            // The host reports this pairing's current grants; reflect host-side permission changes.
+            if (info.permissions && typeof info.permissions === 'object' && !Array.isArray(info.permissions)) device.permissions = info.permissions;
             device.lastSeen = new Date().toISOString();
-          } catch { device.online = false; }
+          } catch (error) {
+            device.online = false;
+            // 401 means the host no longer recognizes this certificate: revoked, not unreachable.
+            if (error.status === 401) { device.revoked = true; device.statusReason = 'Access revoked by the host.'; }
+            else { delete device.revoked; delete device.statusReason; }
+          }
         }));
         await this.save();
         return this.devices();
@@ -428,25 +467,35 @@ class OrbitController {
       case 'files.list': {
         const s = this.getSession(payload);
         const result = (await this.remote(s.device, '/api/sessions/' + encodeURIComponent(s.remoteId) + '/files')).json;
-        return { entries: (Array.isArray(result) ? result : result.entries || []).map(f => ({ ...f, path: f.name, isDirectory: false })), path: '/' };
+        const entries = (Array.isArray(result) ? result : result.entries || []).map(f => ({ ...f, path: f.name, isDirectory: false }));
+        // Remember listed sizes so a download can scale its deadline and refuse oversize files up front.
+        s.fileSizes = new Map(entries.filter(f => typeof f.name === 'string' && Number.isFinite(f.size)).map(f => [f.name, f.size]));
+        return { entries, path: '/' };
       }
       case 'files.upload': {
         const s = this.getSession(payload);
         const selection = await this.native.openFile?.();
         if (!selection) return { cancelled: true };
         const stat = await fs.stat(selection);
-        if (!stat.isFile() || stat.size > 16 * 1024 * 1024) throw new Error('Choose a file up to 16 MiB.');
+        if (!stat.isFile()) throw new Error('Choose a file, not a folder.');
+        if (stat.size > MAX_TRANSFER_BYTES) throw new Error(tooLarge(path.basename(selection)));
         const data = await fs.readFile(selection);
         return (await this.remote(s.device, '/api/sessions/' + encodeURIComponent(s.remoteId) + '/files/' +
-          encodeURIComponent(path.basename(selection)), { method: 'PUT', body: data })).json || { ok: true };
+          encodeURIComponent(path.basename(selection)), { method: 'PUT', body: data,
+          timeout: transferDeadline(data.length), idleTimeout: TRANSFER_IDLE_MS })).json || { ok: true };
       }
       case 'files.download': {
         const s = this.getSession(payload);
         const name = payload.name;
         if (typeof name !== 'string' || name !== path.basename(name) || /[\\/:\x00-\x1f]/.test(name)) throw new Error('Invalid file name.');
+        const listedSize = s.fileSizes?.get(name);
+        if (listedSize > MAX_TRANSFER_BYTES) throw new Error(tooLarge(name));
         const destination = await this.native.saveFile?.(name);
         if (!destination) return { cancelled: true };
-        const result = await this.remote(s.device, '/api/sessions/' + encodeURIComponent(s.remoteId) + '/files/' + encodeURIComponent(name), { maxBytes: 16 * 1024 * 1024 });
+        // Unknown size (not listed this session): budget for the largest file the host will serve.
+        const result = await this.remote(s.device, '/api/sessions/' + encodeURIComponent(s.remoteId) + '/files/' + encodeURIComponent(name), {
+          maxBytes: MAX_TRANSFER_BYTES, tooLargeMessage: tooLarge(name),
+          timeout: transferDeadline(listedSize ?? MAX_TRANSFER_BYTES), idleTimeout: TRANSFER_IDLE_MS });
         await fs.writeFile(destination, result.buffer, { mode: 0o600 });
         return { savedPath: destination };
       }
