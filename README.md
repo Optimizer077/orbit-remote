@@ -87,11 +87,29 @@ Orbit is for reaching your own computers, or ones whose owner explicitly invited
 
 ### What runs on each computer
 
+<p align="center">
+  <picture>
+    <source media="(max-width: 767px) and (prefers-color-scheme: dark)" srcset="docs/assets/diagrams/processes-narrow.svg">
+    <source media="(max-width: 767px)" srcset="docs/assets/diagrams/processes-narrow-light.svg">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/diagrams/processes.svg">
+    <img src="docs/assets/diagrams/processes-light.svg" width="1000" alt="What runs on each computer: a sandboxed Orbit window, the Orbit main process, a local admin API on 127.0.0.1:47831, and the .NET host listening only on the Tailscale address port 47832. One computer reaches the other's host over mutual TLS inside WireGuard.">
+  </picture>
+</p>
+
 The Orbit window is sandboxed with no Node.js access. Keys and the local control token stay in the main process and the host. The host has a local admin API on `127.0.0.1:47831` (bearer token) for its own app, and listens remotely only on its verified Tailscale address. There is no public or LAN listener, remote shell, or router port forwarding. Read [the architecture](docs/ARCHITECTURE.md) for trust boundaries and how multiple screen windows share one session.
 
 ## Security
 
 ### Encrypted in layers
+
+<p align="center">
+  <picture>
+    <source media="(max-width: 767px) and (prefers-color-scheme: dark)" srcset="docs/assets/diagrams/layers-narrow.svg">
+    <source media="(max-width: 767px)" srcset="docs/assets/diagrams/layers-narrow-light.svg">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/diagrams/layers.svg">
+    <img src="docs/assets/diagrams/layers-light.svg" width="1000" alt="Encryption in layers: the Tailscale network boundary, WireGuard, Orbit mutual TLS, and pinned RSA-3072 identities around your screen, keystrokes, clipboard, and files, with keys at rest and stated limits.">
+  </picture>
+</p>
 
 1. **Network: Tailscale WireGuard.** Only your tailnet devices can reach the host. Traffic between them is encrypted with Curve25519 and ChaCha20-Poly1305, including through Tailscale relays.
 2. **Application: Orbit mutual TLS, inside that tunnel.** TLS 1.3, or TLS 1.2 with ECDHE + AES-GCM/ChaCha20-Poly1305 only. Every allowed suite has forward secrecy. The viewer offers only those suites, and the host independently drops anything weaker before reading a request.
@@ -103,9 +121,27 @@ Measured against the real Windows host: clients offering only CBC or static-RSA 
 
 ### Pairing and the security code
 
-The invitation is a secret for five minutes and works once. The viewer verifies the host's certificate **before** revealing that secret. Afterwards both computers show the same eight-group **security code**: compare it once. If someone else used a leaked invitation first, the codes won't match.
+<p align="center">
+  <picture>
+    <source media="(max-width: 767px) and (prefers-color-scheme: dark)" srcset="docs/assets/diagrams/pairing-narrow.svg">
+    <source media="(max-width: 767px)" srcset="docs/assets/diagrams/pairing-narrow-light.svg">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/diagrams/pairing.svg">
+    <img src="docs/assets/diagrams/pairing-light.svg" width="1000" alt="Pairing in six steps: add a device, create a five-minute one-time invitation, send it privately, the viewer checks the certificate fingerprint before sending the secret, the host stores the viewer's pin and grants, and both compare the same security code.">
+  </picture>
+</p>
+
+The invitation is a secret for five minutes and works once. The viewer verifies the host's certificate **before** revealing that secret. Afterwards both computers show the same eight-group **security code**: compare it once. If someone tampered with the invitation's host details, the codes won't match. A leaked invitation still works only once: if a device you don't recognise appears under the host's devices, revoke it.
 
 ### What a paired device can do
+
+<p align="center">
+  <picture>
+    <source media="(max-width: 767px) and (prefers-color-scheme: dark)" srcset="docs/assets/diagrams/permissions-narrow.svg">
+    <source media="(max-width: 767px)" srcset="docs/assets/diagrams/permissions-narrow-light.svg">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/diagrams/permissions.svg">
+    <img src="docs/assets/diagrams/permissions-light.svg" width="1000" alt="Five grants a paired device can have: View (the default), Control, Clipboard, Files, and Power, and the rules that link them.">
+  </picture>
+</p>
 
 | Grant | What it allows | Notes |
 |---|---|---|
@@ -118,6 +154,15 @@ The invitation is a secret for five minutes and works once. The viewer verifies 
 The host enforces every grant on every request, and the owner can revoke a device at any time.
 
 ### Session lifecycle
+
+<p align="center">
+  <picture>
+    <source media="(max-width: 767px) and (prefers-color-scheme: dark)" srcset="docs/assets/diagrams/lifecycle-narrow.svg">
+    <source media="(max-width: 767px)" srcset="docs/assets/diagrams/lifecycle-narrow-light.svg">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/diagrams/lifecycle.svg">
+    <img src="docs/assets/diagrams/lifecycle-light.svg" width="1000" alt="Session states: Paired to Live via Connect or View only, Live to Controlling via Take control and back via Esc, Reconnecting after a network drop, and final states Ended (HTTP 410) and Revoked (HTTP 401).">
+  </picture>
+</p>
 
 - **Paired → Live:** choose **Connect** or **View only**.
 - **Live ↔ Controlling:** **Take control** (if granted); **Esc** gives it back.
