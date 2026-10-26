@@ -4,13 +4,15 @@
     <img src="docs/assets/brand/logo-light.svg" width="320" alt="Orbit Remote">
   </picture>
   <h1>Your world. Within reach.</h1>
-  <p><strong>A native desktop workspace for reaching your own computers over Tailscale.</strong></p>
-  <p>View a screen. Take control with permission. Keep every paired device accountable.</p>
+  <p><strong>A native desktop workspace for reaching your own computers over Tailscale: encrypted end to end, hardware-accelerated.</strong></p>
+  <p>See your screen at up to 60 fps with hardware H.264 (beta). Take control with permission. Keep every paired device accountable.</p>
   <p>
     <a href="docs/VALIDATION.md"><img src="https://img.shields.io/badge/status-development_preview-d9c38b?style=flat-square" alt="Status: development preview"></a>
     <a href="https://github.com/Optimizer077/orbit-remote/releases/tag/v0.1.0-preview.4"><img src="https://img.shields.io/badge/download-Windows_x64-b2e6c5?style=flat-square" alt="Download: Windows x64 preview"></a>
     <a href="docs/ARCHITECTURE.md"><img src="https://img.shields.io/badge/network-Tailscale-aecaff?style=flat-square" alt="Network: Tailscale"></a>
     <a href="docs/ENCRYPTION.md"><img src="https://img.shields.io/badge/encryption-WireGuard_%2B_mutual_TLS-b2e6c5?style=flat-square" alt="Encryption: WireGuard plus mutual TLS, two layers"></a>
+    <a href="docs/ENCRYPTION.md"><img src="https://img.shields.io/badge/identity-pinned_certificates_%C2%B7_revocable-b2e6c5?style=flat-square" alt="Identity: pinned certificates, revocable at any time"></a>
+    <a href="#performance"><img src="https://img.shields.io/badge/video-hardware_H.264_%C2%B7_59_fps_live_(beta)-aecaff?style=flat-square" alt="Video: hardware H.264 stream, 59 frames per second measured live, beta"></a>
     <a href="docs/MACOS.md"><img src="https://img.shields.io/badge/macOS-Apple_silicon_tested-b2e6c5?style=flat-square" alt="macOS: Apple silicon tested, including a real view-only session with Windows"></a>
   </p>
   <p>
@@ -31,7 +33,7 @@
   </picture>
 </p>
 
-> **Public development preview, with explicit limits.** Windows has local runtime evidence. A real view-only session between Windows and an Apple-silicon Mac works in both directions (preview.4). Cross-device control, Intel Macs, and Linux still need validation. Downloads are unsigned; unattended access before login and production security are not established.
+> **Public development preview, with explicit limits.** Windows has local runtime evidence. A real view-only session between Windows and an Apple-silicon Mac works in both directions (preview.4). The hardware video stream (59.3 fps live at 2560×1440 on one PC) ships as a beta in the next release. Cross-device control, Intel Macs, and Linux still need validation. Downloads are unsigned; unattended access before login and production security are not established.
 
 Orbit Remote connects **your own** Windows, macOS, and Linux computers over your private [Tailscale](https://tailscale.com) network. Every installation is both a viewer and a host. Access comes only from an invitation you create, a certificate pinned at pairing, and the permissions the host's owner grants. Orbit runs no server or account, and it never changes your startup, firewall, or Tailscale policy on its own.
 
@@ -47,7 +49,9 @@ Orbit Remote connects **your own** Windows, macOS, and Linux computers over your
 |---|---|---|
 | No Orbit server, account, or relay. Your computers reach each other directly over your own tailnet. | Tailscale WireGuard outside, Orbit mutual TLS 1.3 inside. Both sides refuse weaker encryption. | Single-use invitations, pinned certificates, and a security code you compare once by eye. |
 | **Permission, not presumption** | **Honest status** | **One app, three systems** |
-| View, control, clipboard, files, and power are separate grants that the host enforces and you can revoke. | The viewer shows the encryption actually negotiated. Unsupported states are labeled, never faked. | Windows is exercised today; macOS and Linux adapters are built and await device validation. |
+| View, control, clipboard, files, and power are separate grants that the host enforces and you can revoke. | The viewer shows the encryption actually negotiated. Unsupported states are labeled, never faked. | Windows x64 is exercised today and Windows on ARM builds are ready; Apple-silicon Macs are tested with Windows; Linux awaits device validation. |
+| **Hardware-accelerated** | **Light on the network** | **Fails safe** |
+| GPU capture, hardware H.264 and hardware decode: 59.3 fps at native 2560×1440, measured live (beta, next release). | About 300 KB/s for a live 1440p screen, against 12.5 MB/s for full images. An idle screen sends almost nothing. | If the stream can't run, Orbit falls back to images. Revoking a device ends its stream within a second. |
 
 ## Why Orbit
 
@@ -256,7 +260,7 @@ In preview.4, screen delivery polls one PNG image per update. Windows hosts skip
 
 ## Performance
 
-Frame rate is the current priority. Preview.4 sends one full image per update. The next steps replace that with a hardware video stream, the approach the fastest remote-desktop tools use, built and measured one stage at a time.
+Frame rate is the current priority. Preview.4 sends one full image per update. The next release replaces that with a hardware video stream, the approach the fastest remote-desktop tools use. Measured live on one PC, it reaches **59.3 frames per second at native 2560×1440** with 0.6 ms decode and about 300 KB/s, against about 20 frames per second at 12.5 MB/s for the picture path.
 
 <p align="center">
   <picture>
@@ -273,11 +277,12 @@ Frame rate is the current priority. Preview.4 sends one full image per update. T
 | Connection reuse | Next release | Removes a TLS handshake per frame, about 1.2 s per frame on a 150 ms link |
 | Faster viewer | Next release | Binary frames on a canvas with no fixed pause: 2.0 → 3.75 updates per second on one PC |
 | PNG or JPEG, whichever is smaller | Next release | Full-screen frame 1044 → 497 KiB; on a simulated 2 Mbit/s link with 1 % loss, 5.2 → 2.5 s per frame |
-| GPU screen capture | In development | 4.4 ms per changed frame, against 155 ms for today's capture path; an unchanged screen costs nothing |
-| Hardware H.264 encode | In development | 2.5–2.9 ms per 1080p frame; 2–26 KB per update instead of about 1 MB |
-| Hardware decode in the viewer | In development | 0.5–0.7 ms on Windows, 2.4–3.3 ms on an Apple-silicon Mac; 60 and 120 fps with no dropped frames |
+| GPU screen capture | Next release (beta) | 4.4 ms per changed frame, against 155 ms for today's capture path; an unchanged screen costs nothing |
+| Hardware H.264 encode | Next release (beta) | 2.5–2.9 ms per 1080p frame; 2–26 KB per update instead of about 1 MB |
+| Hardware decode in the viewer | Next release (beta) | 0.5–0.7 ms on Windows, 2.4–3.3 ms on an Apple-silicon Mac; 60 and 120 fps with no dropped frames |
+| **Live video stream, end to end** | Next release (beta) | **59.3 frames/s at native 2560×1440** (1,780 frames in 30 s), 0.6 ms decode, about 300 KB/s; the picture path on the same screen: about 20 frames/s at 12.5 MB/s. Loopback on one PC |
 
-Targets, set against what leading tools publish: 60 fps on a LAN, 10–16 ms of added latency, no freeze longer than 100 ms at 1 % packet loss, and text as sharp as full-color 4:4:4. These are per-stage measurements with synthetic content; end-to-end latency is measured next. Methods, sample sizes, and caveats are in [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+Targets, set against what leading tools publish: 60 fps on a LAN, 10–16 ms of added latency, no freeze longer than 100 ms at 1 % packet loss, and text as sharp as full-color 4:4:4. The 60 fps target is reached on loopback; cross-device runs (Windows, Apple-silicon Mac, Windows on ARM) and input-to-screen latency are measured next. Methods, sample sizes, and caveats are in [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 
 ## Themes
 

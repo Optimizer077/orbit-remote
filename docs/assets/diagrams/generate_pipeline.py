@@ -16,13 +16,13 @@ SUBTITLE = ["Measured per stage at 3024×1898 on one Windows PC (RTX 5060 Ti);",
 # (title, how, value, note, accent, status, glyph)
 STAGES = [
     ("Capture", "DXGI Desktop Duplication on the GPU; an unchanged screen costs nothing", "4.4 ms",
-     "per changed frame", "mint", "Built · wiring now", "monitor"),
+     "per changed frame", "mint", "In the app · beta", "monitor"),
     ("Encode", "Hardware H.264 through Windows Media Foundation", "5.8–7.6 ms",
-     "1080p: 2.5–2.9 ms", "mint", "Prototype", "chip"),
+     "1080p: 2.5–2.9 ms", "mint", "In the app · beta", "chip"),
     ("Send", "One stream inside the pinned mutual-TLS link, inside WireGuard", "2–26 KB",
-     "per update, not ~1 MB", "blue", "Protocol frozen", "lock"),
+     "per update, not ~1 MB", "blue", "In the app · beta", "lock"),
     ("Decode", "WebCodecs hardware decoder; VideoToolbox on a Mac", "0.5–0.7 ms",
-     "Mac: 2.4–3.3 ms", "gold", "Prototype", "chip"),
+     "Mac: 2.4–3.3 ms", "gold", "In the app · beta", "chip"),
     ("Draw", "Canvas; each decoded frame is released right after drawing", "0.2 ms",
      "per frame", "gold", "In the app", "window"),
 ]
@@ -30,9 +30,9 @@ STAGES = [
 BUDGET = [("Capture 4.4 ms", 4.4, "mint"), ("Encode 5.8–7.6 ms", 6.7, "mint"), ("Decode 0.5–0.7 ms", 0.6, "gold"),
           ("Draw 0.2 ms", 0.2, "gold")]
 TOTAL = "≈ 11–13 ms per frame, plus the network"
-TODAY_LEAD = "Today (preview.4):"
-TODAY = "a GDI screenshot plus PNG takes about 150–220 ms and ~1 MB per frame. The stream replaces this path."
-FOOT = "Stage timings are separate measurements, not an end-to-end result; end-to-end latency is measured next."
+TODAY_LEAD = "Live, end to end:"
+TODAY = "59.3 frames/s at native 2560×1440 with 0.6 ms decode and ~300 KB/s, against about 20 frames/s at 12.5 MB/s for preview.4's picture path (loopback, one PC)."
+FOOT = "Stage timings are separate measurements; the live run is a loopback test on one PC. Cross-device results follow."
 
 
 def card(x, y, w, n, stage, p, ty, height=None):
@@ -88,7 +88,7 @@ def today(x, y, w, p, ty):
     """The current per-frame path, for contrast, plus the honesty note; returns (elements, height)."""
     lines = wrap(TODAY_LEAD + " " + TODAY, ty.body, w - 74)
     h = 30 + ty.lh * (len(lines) - 1) + 20
-    out = [rect(x, y, w, h, p["rose_bg"], p["rose"], 14), icon("clock", x + 18, y + 14, 22, p["rose"])]
+    out = [rect(x, y, w, h, p["mint_bg"], p["mint"], 14), icon("check", x + 18, y + 14, 22, p["mint"])]
     for i, text in enumerate(lines):
         if i == 0:  # The lead is bold; wrap() keeps it on the first line because it is short.
             out.append(rich(x + 54, y + 30, [(TODAY_LEAD + " ", p["text"], 700), (text[len(TODAY_LEAD) + 1:], p["text"], 400)], ty.body))
@@ -145,9 +145,9 @@ DESC = ("The hardware streaming pipeline in development, with per-stage measurem
         "encoding through Windows Media Foundation, 5.8 to 7.6 ms, or 2.5 to 2.9 ms at 1080p; sending one stream inside "
         "the pinned mutual-TLS link within WireGuard, 2 to 26 KB per update instead of about 1 MB; WebCodecs hardware "
         "decoding, 0.5 to 0.7 ms on Windows and 2.4 to 3.3 ms on an Apple-silicon Mac; and drawing to a canvas in 0.2 ms. "
-        "The per-frame budget is about 11 to 13 ms plus the network. Today, in preview.4, a GDI screenshot plus PNG takes "
-        "about 150 to 220 ms and about 1 MB per frame. Stage timings are separate measurements; end-to-end latency is "
-        "measured next.")
+        "The per-frame budget is about 11 to 13 ms plus the network. Measured live end to end on one PC: 59.3 frames per second "
+        "at native 2560 by 1440 with 0.6 ms decode and about 300 KB/s, against about 20 frames per second at 12.5 MB/s for the "
+        "preview.4 picture path. Cross-device results follow.")
 
 
 def main():
