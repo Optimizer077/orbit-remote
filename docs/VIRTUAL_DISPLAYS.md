@@ -18,18 +18,12 @@ An extra monitor is useful for a laptop-sized viewer, a headless workstation, de
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    Viewer["Viewer: Add extra screen"] -->|"Request over existing pinned mTLS / Tailscale"| Policy["Host policy + new display grant"]
-    Local["Host owner: enable and approve"] --> Policy
-    Policy --> Lease["Bounded per-session display lease"]
-    Lease --> Provider["Native monitor provider"]
-    Provider --> OS["OS display topology"]
-    OS --> Capture["Capture selected display + encode"]
-    Capture --> Viewer
-    Lease --> Cleanup["Expiry / revoke / disconnect cleanup"]
-    Cleanup --> Provider
-```
+1. The viewer requests an extra screen over the existing pinned mutual-TLS connection inside Tailscale.
+2. Host policy and a separate new-display grant decide; the host owner must have enabled and approved it locally.
+3. An approved request gets a bounded, per-session display lease.
+4. The lease asks the native monitor provider to add an output to the OS display topology.
+5. That display is captured and encoded like any other and sent to the viewer.
+6. Expiry, revocation or disconnect triggers cleanup, which tells the provider to remove the output.
 
 Monitor creation belongs behind a narrow host-managed interface. The renderer never installs a driver or sends arbitrary native commands. The Windows provider should be a separate native project; the existing .NET host can manage it through restricted authenticated IPC. Linux portal handling needs a native/session helper. Each provider reports its actual installed version and capabilities. Unsupported providers return a clear reason without manufacturing a display in the UI.
 
@@ -83,21 +77,20 @@ On X11, support depends on the active display server/driver. An `xrandr` monitor
 
 ## Lifetime and recovery
 
-```mermaid
-stateDiagram-v2
-    [*] --> Probing
-    Probing --> Unavailable: missing or unsupported provider
-    Probing --> Ready: provider verified
-    Ready --> Authorizing: explicit request
-    Authorizing --> Ready: denied / canceled / expired
-    Authorizing --> Creating: policy and consent granted
-    Creating --> Active: output and capture verified
-    Creating --> Cleaning: partial failure / cancellation
-    Active --> Cleaning: revoke / expiry / disconnect / shutdown
-    Cleaning --> Ready: owned output removed
-    Cleaning --> RecoveryRequired: provider failure
-    RecoveryRequired --> Ready: ownership reconciliation succeeds
-```
+| From | To | When |
+|---|---|---|
+| (start) | Probing | — |
+| Probing | Unavailable | Provider missing or unsupported |
+| Probing | Ready | Provider verified |
+| Ready | Authorizing | Explicit request |
+| Authorizing | Ready | Denied, canceled or expired |
+| Authorizing | Creating | Policy and consent granted |
+| Creating | Active | Output and capture verified |
+| Creating | Cleaning | Partial failure or cancellation |
+| Active | Cleaning | Revoke, expiry, disconnect or shutdown |
+| Cleaning | Ready | Owned output removed |
+| Cleaning | RecoveryRequired | Provider failure |
+| RecoveryRequired | Ready | Ownership reconciliation succeeds |
 
 Release held input before stopping capture/removing the output. Revoke access immediately on disconnect; initial policy removes the temporary output immediately. Cleanup is idempotent and bounded. If it fails, show **Recovery required**, retry safely, and expose a local removal action. Do not report success merely because a request was sent.
 

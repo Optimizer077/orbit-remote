@@ -6,23 +6,17 @@ Use this document to understand current costs and collect evidence before choosi
 
 ## Current frame pipeline
 
-```mermaid
-sequenceDiagram
-    participant View as Viewer window
-    participant Main as Viewer main process
-    participant Host as Remote host
-    participant OS as Native desktop adapter
-    View->>Main: Request frame for existing monitor
-    Main->>Host: Pinned mutual-TLS HTTPS request
-    Host->>Host: Check authorization and wait for capture gate
-    Host->>OS: Capture selected display and encode PNG
-    OS-->>Host: PNG plus dimensions and physical origin
-    Host->>Host: Recheck session and authorization
-    Host-->>Main: Frame response and capture timestamp
-    Main-->>View: Base64 image and geometry through IPC
-    View->>View: Update displayed image
-    Note over View: Schedule next poll after approximately 260 ms
-```
+Preview.4 frame path (one request per update):
+
+1. The viewer window asks the main process for a frame of an existing monitor.
+2. The main process sends a pinned mutual-TLS HTTPS request to the remote host.
+3. The host checks authorization and waits for its capture gate.
+4. The native adapter captures the selected display and encodes PNG (dimensions and physical origin included).
+5. The host rechecks the session and authorization, then returns the frame with its capture timestamp.
+6. The main process passes the image and geometry to the window through IPC; the window draws it.
+7. The window schedules the next request (about 260 ms later in preview.4).
+
+The next release replaces this with the hardware video stream described below.
 
 The renderer schedules the next poll with `setTimeout(..., 260)` after the frame request finishes. **260 ms is the configured waiting period, not measured latency or a delivered frame interval.** Request setup, network round trips, host queueing, capture, PNG encoding, response transfer, and local processing add to the time between requests. Browser scheduling and image decoding can add further visible delay.
 

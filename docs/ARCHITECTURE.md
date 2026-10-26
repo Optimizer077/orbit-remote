@@ -15,29 +15,19 @@ This document describes the preview implementation and the boundaries that futur
 
 ## Processes and data flow
 
-```mermaid
-flowchart LR
-    subgraph Viewer["Viewer computer"]
-        UI["Sandboxed desktop and screen windows"]
-        Main["Electron main process"]
-        LocalHost["Local Orbit.Host and device identity"]
-        UI <-->|"Restricted preload IPC"| Main
-        Main <-->|"Loopback HTTP and random bearer token"| LocalHost
-    end
-    subgraph Network["Existing Tailscale network"]
-        Tunnel["Direct or relayed encrypted path"]
-    end
-    subgraph Host["Controlled computer"]
-        Remote["Orbit.Host: remote TLS listener"]
-        Policy["Identity, grants, session ownership"]
-        Native["Native capture and input adapters"]
-        Desktop["Existing unlocked user desktop"]
-        Remote --> Policy --> Native
-        Native <-->|"OS APIs and consent"| Desktop
-    end
-    Main <-->|"Pinned mutual TLS"| Tunnel
-    Tunnel <--> Remote
-```
+<p align="center">
+  <picture>
+    <source media="(max-width: 767px) and (prefers-color-scheme: dark)" srcset="assets/diagrams/architecture-narrow.svg">
+    <source media="(max-width: 767px)" srcset="assets/diagrams/architecture-narrow-light.svg">
+    <source media="(prefers-color-scheme: dark)" srcset="assets/diagrams/architecture.svg">
+    <img src="assets/diagrams/architecture-light.svg" width="1000" alt="Orbit Remote architecture: the viewer computer's Electron app sends pinned mutual-TLS requests inside a Tailscale WireGuard tunnel to the host computer's .NET Orbit host, which checks link policy, identity, grants and session before reaching the desktop.">
+  </picture>
+</p>
+
+- **Viewer computer:** sandboxed desktop and screen windows talk to the Electron main process only through restricted preload IPC; the main process talks to its own local Orbit.Host (device identity) over loopback HTTP with a random bearer token.
+- **Network:** your existing Tailscale network carries a direct or relayed encrypted path.
+- **Controlled computer:** Orbit.Host's remote TLS listener checks identity, grants and session ownership, then drives native capture and input adapters on the existing unlocked user desktop (OS APIs and consent).
+- The viewer main process reaches the remote listener with **pinned mutual TLS** inside that tunnel.
 
 The main process owns outgoing connections, session state, native dialogs, and the child-host lifetime. Its renderer bridge exposes named operations rather than arbitrary URLs, filesystem access, shell commands, or raw keys. The renderer has no Node.js access and does not receive the local control token or private keys.
 
@@ -62,30 +52,22 @@ An authorized controller can exercise the desktop permissions its owner granted.
 
 ## Pairing and opening a session
 
-```mermaid
-sequenceDiagram
-    actor Owner as Host owner
-    participant HUI as Host desktop app
-    participant Host as Host native process
-    actor User as Viewer user
-    participant Viewer as Viewer main process
-    Owner->>HUI: Choose device grants and create invitation
-    HUI->>Host: Authenticated local invite request
-    Host-->>HUI: Address, certificate pin, secret, expiry
-    HUI-->>Owner: Show invitation
-    Owner-->>User: Transfer invitation privately
-    User->>Viewer: Paste invitation
-    Viewer->>Viewer: Validate address, format and expiry
-    Viewer->>Host: TLS handshake with viewer certificate
-    Host-->>Viewer: Present host certificate
-    Viewer->>Viewer: Verify host pin before sending secret
-    Viewer->>Host: Pair using invitation secret
-    Host->>Host: Consume invite and persist viewer pin plus grants
-    Host-->>Viewer: Host identity and approved permissions
-    Viewer->>Host: Request a view-only or control-capable session
-    Host->>Host: Check identity, grants, native state and controller limit
-    Host-->>Viewer: Session and monitor metadata
-```
+<p align="center">
+  <picture>
+    <source media="(max-width: 767px) and (prefers-color-scheme: dark)" srcset="assets/diagrams/pairing-narrow.svg">
+    <source media="(max-width: 767px)" srcset="assets/diagrams/pairing-narrow-light.svg">
+    <source media="(prefers-color-scheme: dark)" srcset="assets/diagrams/pairing.svg">
+    <img src="assets/diagrams/pairing-light.svg" width="1000" alt="Pairing in six steps: the host owner creates a five-minute single-use invitation, sends it privately, the viewer verifies the host certificate pin before sending the secret, and the host stores the viewer pin and grants.">
+  </picture>
+</p>
+
+1. The host owner chooses device grants and creates an invitation in the host desktop app; the app asks the host process over the authenticated local API.
+2. The host returns the address, certificate pin, secret and expiry, and the app shows the invitation.
+3. The owner transfers the invitation privately; the viewer user pastes it.
+4. The viewer main process validates the address, format and expiry, then opens TLS with its own viewer certificate.
+5. The host presents its certificate; the viewer **verifies the host pin before sending the secret**.
+6. The viewer pairs with the invitation secret; the host consumes the invite and persists the viewer pin plus grants, then returns its identity and the approved permissions.
+7. The viewer requests a view-only or control-capable session; the host checks identity, grants, native state and the controller limit, and returns session and monitor metadata.
 
 Invitations expire after five minutes, can be consumed once, and are bearer credentials until then. The host holds only a secret hash in memory; unused invitations disappear at host restart. The viewer verifies the host certificate before transmitting the secret. Successful pairing associates the viewer's actual TLS certificate with the chosen grants. Certificate possession and network reachability alone do not authorize normal application routes.
 
@@ -97,17 +79,10 @@ Session renewal reuses the paired identity and rechecks current permissions. It 
 
 An active connection can open an existing host display in a separate local window. The main window and screen windows refer to the **same authenticated remote session**. Per-frame monitor selection changes which existing display is captured; it does not allocate a second controller or replace the session to switch monitors.
 
-```mermaid
-flowchart LR
-    W1["Main viewer: host display A"] --> Main["Shared main-process session"]
-    W2["Screen window: host display B"] --> Main
-    Main --> Session["One authenticated host session"]
-    Session --> Capture["Serialized native capture"]
-    Capture --> A["Existing display A"]
-    Capture --> B["Existing display B"]
-    Main --> Input["Shared serialized input and release path"]
-    Input --> Desktop["Same host user desktop"]
-```
+1. The main viewer (host display A) and any extra screen window (host display B) share one main-process session.
+2. That session is one authenticated host session.
+3. Capture is serialized natively per existing display (A, B).
+4. Input from every window goes through one shared, serialized input and release path to the same host user desktop.
 
 Each window keeps its monitor context so input uses the dimensions and physical origin of the frame it displays. The native host validates coordinates against reported displays. This does not establish per-display security isolation: a controlling session operates the same user's desktop. Closing a screen window releases input while leaving other windows connected. Ending the parent session ends its attached screen windows.
 
