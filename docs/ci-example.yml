@@ -1,0 +1,32 @@
+name: Build and security checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  checks:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: '10.0.x'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Host and permission checks
+        run: dotnet run --project tests/Orbit.Host.Tests/Orbit.Host.Tests.csproj
+      - name: Desktop dependencies
+        working-directory: apps/desktop
+        run: npm ci --no-fund --no-audit
+      - name: Desktop transport and session checks
+        working-directory: apps/desktop
+        run: npm test
+      - name: Build renderer
+        working-directory: apps/desktop
+        run: npm run build

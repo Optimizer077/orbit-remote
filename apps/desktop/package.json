@@ -1,0 +1,40 @@
+{
+  "name": "orbit-remote",
+  "version": "0.1.0",
+  "description": "Private remote desktop over your Tailscale network",
+  "author": { "name": "Optimizer077", "email": "187713772+Optimizer077@users.noreply.github.com" },
+  "homepage": "https://github.com/Optimizer077/orbit-remote-public#readme",
+  "repository": { "type": "git", "url": "git+https://github.com/Optimizer077/orbit-remote-public.git" },
+  "bugs": { "url": "https://github.com/Optimizer077/orbit-remote-public/issues" },
+  "private": true,
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "start": "node electron/launch.cjs",
+    "test": "node --test electron/*.test.cjs",
+    "test:ui": "playwright test",
+    "package": "npm run build && electron-builder --dir --publish never",
+    "package:win": "npm run build && electron-builder --win nsis portable --publish never",
+    "package:mac": "npm run build && electron-builder --mac dmg --publish never",
+    "package:linux": "npm run build && electron-builder --linux AppImage deb --publish never"
+  },
+  "dependencies": {
+    "lucide-react": "1.61.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "6.1.2",
+    "electron": "45.0.0",
+    "electron-builder": "26.18.0",
+    "typescript": "7.0.2",
+    "vite": "8.3.5"
+  }
+}

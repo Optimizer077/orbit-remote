@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 550 160" role="img" aria-labelledby="title">
+  <title id="title">Orbit Remote</title>
+  <g transform="translate(-6 -6) scale(.167)"><g fill="none" stroke="#286647" stroke-width="23">
+    <circle cx="512" cy="512" r="220"/>
+    <ellipse cx="512" cy="512" rx="330" ry="122" transform="rotate(-32 512 512)"/>
+  </g>
+  <circle cx="512" cy="512" r="65" fill="#286647"/>
+  <circle cx="791.86" cy="337.13" r="34" fill="#286647"/></g>
+  <g fill="none" stroke="#243329" stroke-width="8" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="220" cy="70" r="29"/>
+    <path d="M278 100V42M278 66C278 48 292 40 310 42"/>
+    <path d="M335 17V100M335 70C335 31 394 31 394 70C394 109 335 109 335 70Z"/>
+    <path d="M423 43V100M461 22V82Q461 101 480 101H491M445 43H492"/>
+  </g>
+  <circle cx="423" cy="21" r="5" fill="#243329"/>
+  <circle cx="518" cy="96" r="6" fill="#286647"/>
+  <path d="M190 141V124H197Q202 124 202 129Q202 133 197 133H190M197 133L203 141
+    M218 141H208V124H218M208 132H216
+    M224 141V124L232 135L240 124V141
+    M255 124C245 124 245 141 255 141C265 141 265 124 255 124Z
+    M268 124H282M275 124V141
+    M298 141H288V124H298M288 132H296" fill="none" stroke="#243329" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+
+</svg>

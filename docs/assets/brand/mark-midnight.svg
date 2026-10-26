@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="140 140 744 744" role="img" aria-labelledby="title">
+  <title id="title">Orbit Remote orbital mark</title>
+  <g fill="none" stroke="#aecaff" stroke-width="25">
+    <circle cx="512" cy="512" r="220"/>
+    <ellipse cx="512" cy="512" rx="330" ry="122" transform="rotate(-32 512 512)"/>
+  </g>
+  <circle cx="512" cy="512" r="65" fill="#aecaff"/>
+  <circle cx="791.86" cy="337.13" r="34" fill="#aecaff"/>
+</svg>

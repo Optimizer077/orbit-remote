@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title">
+  <title id="title">Orbit Remote app icon</title>
+  <defs>
+    <linearGradient id="surface" x1="0" y1="0" x2="0" y2="1">
+      <stop stop-color="#20382f"/><stop offset="1" stop-color="#101521"/>
+    </linearGradient>
+  </defs>
+  <rect x="48" y="48" width="928" height="928" rx="222" fill="url(#surface)"/>
+  <g fill="none" stroke="#b2e6c5" stroke-width="25">
+    <circle cx="512" cy="512" r="220"/>
+    <ellipse cx="512" cy="512" rx="330" ry="122" transform="rotate(-32 512 512)"/>
+  </g>
+  <circle cx="512" cy="512" r="65" fill="#b2e6c5"/>
+  <circle cx="791.86" cy="337.13" r="34" fill="#b2e6c5"/>
+</svg>

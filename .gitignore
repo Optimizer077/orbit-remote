@@ -1,0 +1,16 @@
+**/node_modules/
+**/bin/
+**/obj/
+**/dist/
+**/release/
+**/test-results/
+**/playwright-report/
+.orbit/
+artifacts/
+*.pfx
+*.key
+*.log
+.DS_Store
+.env
+__pycache__/
+*.pyc
