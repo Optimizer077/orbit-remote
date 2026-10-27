@@ -10,6 +10,12 @@ if (!OperatingSystem.IsMacOS())
     return 2;
 }
 
+if (args.Contains("--keychain-counts"))
+{
+    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(LoginKeychainCounts.Read()));
+    return 0;
+}
+
 var checks = 0;
 var failures = new List<string>();
 void Check(bool condition, string message)
@@ -17,6 +23,10 @@ void Check(bool condition, string message)
     checks++;
     if (!condition) failures.Add(message);
 }
+
+if (args.Contains("--imageio")) ImageIoJpegChecks.Run(Check);
+if (args.Contains("--capture-pipe")) await MacCapturePipeChecks.RunAsync(Check);
+MacInputFlagChecks.Run(Check);
 
 await using var backend = PlatformBackendFactory.Create();
 var identityDirectory = Path.Combine(Path.GetTempPath(), "orbit-mac-identity-test-" + Guid.NewGuid().ToString("N"));
@@ -70,6 +80,13 @@ foreach (var monitor in status.Monitors)
 }
 Check(status.Monitors.Select((m, index) => status.Monitors.Take(index).All(previous =>
     (long)previous.Left + previous.Width <= m.Left)).All(x => x), "Mixed-DPI monitor ranges never overlap");
+Check(!status.CanScaleFrames && !status.CanConditionalFrames, "Encoded Mac capture advertises no raw-frame scaling or conditional capability");
+
+if (args.Contains("--frame-fallback"))
+{
+    if (status.CanCapture) await MacFrameFallbackChecks.RunAsync(Check);
+    else Console.WriteLine("Mac frame-route fallback check skipped: local Screen Recording approval is required.");
+}
 
 if (args.Contains("--capture"))
 {

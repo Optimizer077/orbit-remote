@@ -1,0 +1,5 @@
+.remote-viewer.local-cursor{isolation:isolate;cursor:none}
+.remote-viewer.local-cursor.controlling{cursor:none}
+.remote-viewer>.remote-cursor-layer{position:absolute;pointer-events:none;object-fit:fill;max-width:none;user-select:none;display:none;image-rendering:pixelated}
+.remote-viewer>.remote-cursor-invert{z-index:2;mix-blend-mode:difference}
+.remote-viewer>.remote-cursor-replace{z-index:3}

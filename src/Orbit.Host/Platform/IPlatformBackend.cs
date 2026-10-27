@@ -12,12 +12,26 @@ public interface IPlatformBackend : IAsyncDisposable
     Task LockAsync(CancellationToken cancellationToken = default);
 }
 
+/// <summary>Optional fixed wake capability; unrelated backends default to unknown/unsupported.</summary>
+public interface IDisplayAvailability
+{
+    string DisplayState { get; }
+    bool CanWakeDisplay { get; }
+    Task WakeDisplayAsync(CancellationToken cancellationToken = default);
+}
+
+public interface IFrameChangeSource
+{
+    Task WaitForChangeAsync(ScreenFrame observed, int maximumWaitMilliseconds, CancellationToken cancellationToken = default);
+}
+
 public sealed record PlatformStatus(string OperatingSystem, string SessionState, bool CanCapture,
     bool CanInput, bool CanClipboard, bool CanLock, IReadOnlyList<MonitorInfo> Monitors,
-    IReadOnlyList<string> Limitations, bool CanScaleFrames = false, bool CanConditionalFrames = false);
+    IReadOnlyList<string> Limitations, bool CanScaleFrames = false, bool CanConditionalFrames = false, bool CanJpegFrames = false, bool CanWaitForFrames = false, bool CanLocalCursor = false, string DisplayState = "unknown", bool CanWakeDisplay = false);
 public sealed record MonitorInfo(string Id, string Name, int Left, int Top, int Width, int Height, bool Primary);
+// Raw capture may leave Png empty to defer compression until after negotiation.
 public sealed record ScreenFrame(byte[] Png, int Width, int Height, int Left, int Top, DateTimeOffset CapturedUtc,
-    byte[]? RawBgra = null, string? MonitorId = null);
+    byte[]? RawBgra = null, string? MonitorId = null, string? NativeGeneration = null, long NativeVersion = 0);
 public sealed record RemoteInput(string Kind, int X = 0, int Y = 0, string? Button = null,
     string? Key = null, bool? IsDown = null, int DeltaX = 0, int DeltaY = 0);
 

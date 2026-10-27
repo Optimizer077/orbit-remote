@@ -2,7 +2,7 @@
 
 The requested product is a private, capable remote desktop service with a GUI on Windows, macOS, and Linux. Each computer may act as host or viewer. Shared access is explicitly authorized, scoped, and revocable. Locked-screen control, startup, restart, and reconnection are first-class requirements.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the current processes, trust boundaries, pairing sequence, and shared-session screen windows. [PERFORMANCE.md](PERFORMANCE.md) defines the current PNG pipeline and measurement work; [VIRTUAL_DISPLAYS.md](VIRTUAL_DISPLAYS.md) covers the separate native work to create extra host monitors. The actionable handoff is [TODO.md](../TODO.md).
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the current processes, trust boundaries, pairing sequence, and shared-session screen windows. [PERFORMANCE.md](PERFORMANCE.md) describes the hardware video pipeline, its measurements and the image fallback; [VIRTUAL_DISPLAYS.md](VIRTUAL_DISPLAYS.md) covers the separate native work to create extra host monitors. The actionable handoff is [TODO.md](../TODO.md).
 
 ## Implemented foundation
 

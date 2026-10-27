@@ -6,4 +6,8 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <AssemblyName>Orbit.Host</AssemblyName>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)' == 'Diagnostic'">
+    <DefineConstants>$(DefineConstants);ORBIT_DIAGNOSTICS</DefineConstants>
+    <Optimize>true</Optimize>
+  </PropertyGroup>
 </Project>

@@ -1,6 +1,6 @@
 # Continue development on a Mac
 
-Orbit is an evaluation preview. Native Apple silicon execution, DMG installation, both-display capture, keyboard/mouse control, clipboard, and local encrypted-session recovery have been exercised on macOS. See [the Mac validation record](MACOS-VALIDATION.md) for the exact scope. Intel execution and sessions between separate Mac/Windows computers remain unverified. A Windows `.exe` cannot run natively on macOS; build the Mac application on your Mac.
+Orbit is an evaluation preview. Native Apple silicon execution, DMG installation, both-display capture, keyboard/mouse control, clipboard, and local encrypted-session recovery have been exercised on macOS. See [the Mac validation record](MACOS-VALIDATION.md) for the exact scope. Current Windows-generated H.264 video reached the Mac, but its sustained-playback and terminal test remains incomplete. Intel execution remains untested. A Windows `.exe` cannot run natively on macOS; build the Mac application on your Mac.
 
 ## 1. Install prerequisites
 
@@ -96,9 +96,11 @@ npm --prefix apps/desktop ci --no-audit --no-fund
 bash scripts/check-mac.sh --expect-interactive
 ```
 
-The launcher resolves macOS's temporary-directory alias, runs the native Mac harness and channel checks, then runs the Mac Electron smoke test. It uses an isolated profile and loopback-only pairing. If Screen Recording is denied, it verifies that sessions are refused and reports the denied state; that result is not a successful screen-sharing test.
+The standalone launcher resolves macOS's temporary-directory alias, runs the native Mac and host harnesses, desktop tests, production build and production dependency audit, then runs the Mac Electron tests. It works in a product-only checkout without internal coordination files. Tests use isolated profiles and loopback-only pairing. The session test verifies denied Screen Recording behavior when access is unavailable; the UI/native-control checks require local approval to exercise real frames and input.
 
 To exercise the installed app with actual pointer/keyboard and clipboard operations after local OS approval:
+
+Playwright attaches through the inspector, which release builds disable with Electron fuses. Run these checks against a test-only build made with `ORBIT_UNFUSED_TEST_BUILD=1 npm run package:mac` (output in `apps/desktop/release/unfused-test`), never against a release build.
 
 ```bash
 ORBIT_MAC_TEST_APP="$HOME/Applications/Orbit Remote.app" \
@@ -107,5 +109,13 @@ ORBIT_MAC_TEST_CONTROL=1 \
 ```
 
 The control check clicks and types only in temporary test windows on the available displays, checks Shift/release behavior, restores the clipboard and cursor, and shuts down its host. It also tests crash recovery and deliberate host-stop enforcement. It does not save desktop images, clipboard data, invitations, or private identities to test artifacts. The Windows smoke test remains separate in `desktop.spec.ts`.
+
+When macOS reports a locked desktop, the interactive Electron tests explicitly skip. A separate test checks that capture, input and clipboard capabilities are disabled, monitor details are absent, and both view-only and control session creation are refused. It never locks or unlocks the Mac or performs input, capture or clipboard operations. A locked-desktop pass does not establish interactive access; `--expect-interactive` still fails until a local user unlocks the desktop.
+
+Add `--frame-fallback` to the check command to exercise the actual Mac frame endpoint with a requested scale and conditional validator. It must still return a full-resolution PNG with scale 1 and no ETag. The Mac UI test also measures the login keychain before launch, during execution, after a forced test-host termination/restart, and after quit. Only counts are returned; private key bytes and keychain labels are never requested.
+
+Add `--imageio` to run synthetic native ImageIO JPEG round-trip checks and a 1080p encoder microbenchmark. It checks channel order, orientation, ignored alpha, bounds, cancellation and concurrent encodes. This encoder-only component does not enable JPEG on the current encoded-PNG Mac capture path; its timings are not live sharing FPS.
+
+Add `--capture-pipe` for the proposed native helper's managed framing/credit fixtures. They use synthetic bytes, including a full 4K BGRA payload, and perform no screen capture or permission changes. They do not establish ScreenCaptureKit or native-helper execution.
 
 See [`TODO.md`](../TODO.md), [`PLAN.md`](PLAN.md), and [`VALIDATION.md`](VALIDATION.md) for release gates and the current evidence. Prioritize real Mac/Windows pairing in both directions, permission-denied behavior, Retina and negative monitor coordinates, modifier release on disconnect, revocation during an active session, sleep/wake, and Tailscale reconnection. Record exact hardware/OS, architecture, source commit, permission attribution, direct/relay path, and failures. Locked-screen support, persistent services, a native macOS permission helper, low-latency video, signing/notarization, and native secret storage must remain explicit next steps until implemented and verified.

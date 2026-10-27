@@ -2,6 +2,12 @@
 
 Environment: Windows x64, .NET SDK 10.0.200, Node.js 24.20.0, Electron 45.0.0, installed Tailscale 1.104.2. Dates use the user's Asia/Seoul context.
 
+## Status in preview.5 (27 October 2026)
+
+- Windows hosts now stream hardware H.264 video by default: GPU capture (DXGI Desktop Duplication), hardware encoding through Windows Media Foundation, and WebCodecs hardware decoding in the viewer, with images as the fallback. Per-stage, whole-stream, and recovery measurements from one Windows PC with an NVIDIA GPU are in [PERFORMANCE.md](PERFORMANCE.md). Mac and Linux hosts still send images.
+- The checks run for this release are listed in its release notes.
+- The sections below are the record of 26 October 2026. Where they mention PNG frames or polling, they describe the image path that was current then.
+
 ## Verified locally
 
 - Native host Debug/Release compilation with warnings treated as errors.
@@ -27,7 +33,12 @@ Environment: Windows x64, .NET SDK 10.0.200, Node.js 24.20.0, Electron 45.0.0, i
 - Locked/sign-in/UAC screen support or reboot recovery before a user logs in. These are unsupported in this build.
 - macOS or Linux runtime correctness, permission UX, packaging/signing, or any Wayland support.
 - Creating, resizing, or removing virtual host monitors. No virtual display provider/driver is implemented or installed.
-- Hardware video encoding, audio, long-run stability, large-scale performance, independent security review, or production suitability.
+- Click-to-screen (end-to-end) latency. Stream results so far come from host and viewer on one PC.
+- Video between two computers. Windows-generated video has reached a Mac viewer, but sustained cross-device playback has not been measured.
+- AMD and Intel hardware encoders. Only an NVIDIA encoder has been measured.
+- Video from Linux or Mac hosts. They send images; neither has a video stream.
+- Real-screen capture tests and native input probes. They were not run in the automated release checks on the build machine.
+- Audio, long-run stability, large-scale performance, independent security review, or production suitability.
 
 Future device validation should record exact OS/hardware, monitor/DPI layout, keyboard layout, source commit, Tailscale connection type, permission state, tests performed, failures, and recovery steps. See `PLAN.md` for the release gates.
 

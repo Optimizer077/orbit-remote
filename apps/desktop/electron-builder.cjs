@@ -7,10 +7,18 @@ const prefixes = { win32: 'win', darwin: 'osx', linux: 'linux' };
 const runtime = process.env.ORBIT_HOST_RUNTIME || prefixes[process.platform] + '-' + process.arch;
 if (!/^(win|osx|linux)-(x64|arm64)$/.test(runtime)) throw new Error('Unsupported native host runtime: ' + runtime);
 const hostDirectory = path.resolve(__dirname, '../../artifacts/host', runtime);
+// Playwright attaches through --inspect, which the fuses below disable. ORBIT_UNFUSED_TEST_BUILD=1 builds a
+// test-only app into its own folder; release scripts refuse it.
+const unfusedTest = process.env.ORBIT_UNFUSED_TEST_BUILD === '1';
 
 module.exports = {
   appId: 'dev.orbit.remote', productName: 'Orbit Remote',
-  directories: { output: process.env.ORBIT_PACKAGE_OUTPUT || 'release/preview', buildResources: 'build' },
+  directories: { output: unfusedTest ? 'release/unfused-test' : process.env.ORBIT_PACKAGE_OUTPUT || 'release/preview', buildResources: 'build' },
+  // Fuses: no ELECTRON_RUN_AS_NODE, NODE_OPTIONS or --inspect/SIGUSR1 debugger in an installed build, and app code
+  // only from a packaged asar whose integrity is checked. A local process could otherwise run code as Orbit and use
+  // its keys and OS permissions (a per-user install lets the same user replace app.asar).
+  ...(unfusedTest ? {} : { electronFuses: { runAsNode: false, enableNodeOptionsEnvironmentVariable: false,
+    enableNodeCliInspectArguments: false, onlyLoadAppFromAsar: true, enableEmbeddedAsarIntegrityValidation: true } }),
   files: ['dist/**/*', 'electron/**/*', 'package.json', '!electron/*.test.cjs', '!electron/test-fixtures/**/*'],
   extraResources: [
     { from: hostDirectory, to: 'host' },

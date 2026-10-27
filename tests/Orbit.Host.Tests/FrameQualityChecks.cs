@@ -24,9 +24,9 @@ public static class FrameQualityChecks
             FrameQuality.Prepare(value, session, epoch, null, scale, tag);
         var initial = Prepare(frame);
         check(initial.ETag is not null && initial.ETag.Length <= FrameQuality.MaximumValidatorLength && FrameQuality.ParseConditionalTag(initial.ETag) == initial.ETag, "Generated ETag is one bounded quoted validator");
-        check(!initial.NotModified && initial.Png.SequenceEqual(frame.Png), "No conditional request always receives a PNG body");
+        check(!initial.NotModified && initial.Body.SequenceEqual(frame.Png), "No conditional request always receives a PNG body");
         var same = Prepare(frame with { CapturedUtc = frame.CapturedUtc.AddSeconds(1) }, tag: initial.ETag);
-        check(same.NotModified && same.Png.Length == 0 && same.ETag == initial.ETag, "Matching fresh pixels return no body while capture timestamp changes do not defeat304");
+        check(same.NotModified && same.Body.Length == 0 && same.ETag == initial.ETag, "Matching fresh pixels return no body while capture timestamp changes do not defeat304");
         check(!Prepare(frame, tag: "\"old\"").NotModified, "A different validator receives the current PNG body");
         var alphaPixels = pixels.ToArray(); for (var i = 3; i < alphaPixels.Length; i += 4) alphaPixels[i] = 255;
         check(Prepare(frame with { RawBgra = alphaPixels }, tag: initial.ETag).NotModified, "Undefined native alpha does not change visible RGB validator");
@@ -41,17 +41,17 @@ public static class FrameQualityChecks
         var half = Prepare(frame, scale: 0.5);
         check(half.EncodedWidth == 2 && half.EncodedHeight == 1 && half.Scale == 0.5, "Optional downscale reports encoded dimensions independently");
         check(frame.Width == 4 && frame.Height == 2 && frame.Left == -400 && frame.Top == -20, "Downscaling preserves original physical input coordinates");
-        check(PngEncoder.ReadDimensions(half.Png) == (2, 1), "Scaled PNG header contains the encoded pixel dimensions");
-        check(ReadRgbScanlines(half.Png).SequenceEqual(new byte[] { 0, 60, 0, 0, 100, 0, 0 }), "Box downscale encodes independently verified averaged RGB pixels");
+        check(PngEncoder.ReadDimensions(half.Body) == (2, 1), "Scaled PNG header contains the encoded pixel dimensions");
+        check(ReadRgbScanlines(half.Body).SequenceEqual(new byte[] { 0, 60, 0, 0, 100, 0, 0 }), "Box downscale encodes independently verified averaged RGB pixels");
         check(half.ETag != initial.ETag && !Prepare(frame, scale: 0.5, tag: initial.ETag).NotModified, "Changing requested scale forces a fresh image");
         check(Prepare(frame, scale: 0.5, tag: half.ETag).NotModified, "Scaled representation can be conditionally reused only with its own validator");
         check(Prepare(frame, scale: 0.33).EncodedHeight == 1, "Very small scaled dimensions remain at least one pixel");
 
         var fallback = Prepare(frame with { RawBgra = null }, scale: 0.5, tag: initial.ETag);
         check(!fallback.CanScale && !fallback.CanUseConditional && !fallback.NotModified && fallback.ETag is null, "Encoded-only backends explicitly decline raw-frame features");
-        check(fallback.Scale == 1 && fallback.EncodedWidth == 4 && fallback.EncodedHeight == 2 && fallback.Png.SequenceEqual(frame.Png), "Encoded-only fallback sends the full-resolution original PNG");
+        check(fallback.Scale == 1 && fallback.EncodedWidth == 4 && fallback.EncodedHeight == 2 && fallback.Body.SequenceEqual(frame.Png), "Encoded-only fallback sends the full-resolution original PNG");
         reject(() => Prepare(frame with { RawBgra = [] }), "Invalid raw buffer is rejected before hashing");
-        reject(() => Prepare(frame with { Png = half.Png }), "Raw/encoded geometry mismatch is rejected");
+        reject(() => Prepare(frame with { Png = half.Body }), "Raw/encoded geometry mismatch is rejected");
         using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
         var cancelledCapture = false;
         try { FrameQuality.Prepare(frame, "s", "e", null, 1, null, cancelled.Token); } catch (OperationCanceledException) { cancelledCapture = true; }

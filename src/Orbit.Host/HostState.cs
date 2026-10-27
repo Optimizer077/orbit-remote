@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 
@@ -80,8 +81,9 @@ public sealed class HostState
         {
             if (!invites.Remove(Security.HashToken(request.Secret), out var invite) || invite.ExpiresAt <= clock.GetUtcNow()) throw new UnauthorizedAccessException("The invite expired, was already used, or is invalid.");
             var existing = state.Devices.FindIndex(d => d.Fingerprint == fingerprint);
-            var peer = new PairedDevice(existing >= 0 ? state.Devices[existing].Id : Guid.NewGuid().ToString("N"), string.IsNullOrWhiteSpace(invite.DeviceName) ? request.DeviceName.Trim() : invite.DeviceName.Trim(), fingerprint, invite.Permissions, clock.GetUtcNow(), ResumeEpoch: Security.RandomToken());
+            var peer = new PairedDevice(existing >= 0 ? state.Devices[existing].Id : Guid.NewGuid().ToString("N"), string.IsNullOrWhiteSpace(invite.DeviceName) ? request.DeviceName.Trim() : invite.DeviceName.Trim(), fingerprint, invite.Permissions, clock.GetUtcNow(), ResumeEpoch: Security.RandomToken(), BlockedByOwner: existing >= 0 && state.Devices[existing].BlockedByOwner);
             if (existing >= 0) state.Devices[existing] = peer; else state.Devices.Add(peer);
+            foreach (var session in sessions.Values.Where(session => session.DeviceId == peer.Id).ToArray()) sessions.Remove(session.Id);
             Save(); AddAudit("device.paired", peer.Id, "Device certificate pinned after invite verification.");
             return peer;
         }
@@ -94,7 +96,7 @@ public sealed class HostState
             revokedControllingSession = false;
             var index = state.Devices.FindIndex(d => d.Id == id && d.RevokedAt is null); if (index < 0) return false;
             revokedControllingSession = sessions.Values.Any(s => s.DeviceId == id && s.Permissions.Control);
-            state.Devices[index] = state.Devices[index] with { RevokedAt = clock.GetUtcNow() };
+            state.Devices[index] = state.Devices[index] with { RevokedAt = clock.GetUtcNow(), BlockedByOwner = false };
             foreach (var session in sessions.Values.Where(s => s.DeviceId == id).ToArray()) sessions.Remove(session.Id);
             Save(); AddAudit("device.revoked", id, "Device access revoked locally; its sessions ended."); return true;
         }
@@ -105,6 +107,7 @@ public sealed class HostState
         {
             ExpireSessions();
             device = state.Devices.FirstOrDefault(d => d.Fingerprint == device.Fingerprint && d.RevokedAt is null) ?? throw new UnauthorizedAccessException();
+            if (device.BlockedByOwner) throw new OwnerEndedException();
             if (expectedResumeEpoch is not null && !Security.TokenEquals(expectedResumeEpoch, device.ResumeEpoch)) throw new SessionEndedException();
             var permissions = viewOnly ? device.Permissions with { Control = false, Clipboard = false, Files = false, Power = false } : device.Permissions;
             if (sessions.Values.Count(session => session.DeviceId == device.Id) >= MaximumSessionsPerDevice)
@@ -122,6 +125,8 @@ public sealed class HostState
         {
             ExpireSessions();
             if (!sessions.TryGetValue(id, out var session) || session.DeviceId != deviceId) return null;
+            var device = state.Devices.FirstOrDefault(candidate => candidate.Id == deviceId && candidate.RevokedAt is null);
+            if (device is null || device.BlockedByOwner || !Security.TokenEquals(device.ResumeEpoch, session.ResumeEpoch)) return null;
             session = session with { LastActivityAt = clock.GetUtcNow() }; sessions[id] = session; return session;
         }
     }
@@ -135,9 +140,9 @@ public sealed class HostState
             endedControllingSession = session.Permissions.Control;
             if (deviceId is null)
             {
-                var index = state.Devices.FindIndex(d => d.Id == session.DeviceId);
-                if (index >= 0) state.Devices[index] = state.Devices[index] with { ResumeEpoch = Security.RandomToken() };
-                Save();
+                if (!BlockDevice(session.DeviceId, out endedControllingSession)) return false;
+                AddAudit("session.ended", session.DeviceId, "Owner ended the session and blocked its device until explicitly allowed again.");
+                return true;
             }
             sessions.Remove(id); AddAudit("session.ended", session.DeviceId, "Remote session ended."); return true;
         }
@@ -146,20 +151,60 @@ public sealed class HostState
     {
         lock (gate) if (sessions.TryGetValue(id, out var session)) sessions[id] = session with { LastInputAt = clock.GetUtcNow() };
     }
+    public bool BlockDevice(string id, out bool endedControllingSession)
+    {
+        lock (gate)
+        {
+            endedControllingSession = false;
+            var index = state.Devices.FindIndex(device => device.Id == id && device.RevokedAt is null);
+            if (index < 0) return false;
+            endedControllingSession = sessions.Values.Any(session => session.DeviceId == id && session.Permissions.Control);
+            if (!state.Devices[index].BlockedByOwner)
+            {
+                state.Devices[index] = state.Devices[index] with { BlockedByOwner = true, ResumeEpoch = Security.RandomToken() };
+                Save();
+                AddAudit("device.blocked_by_owner", id, "Owner blocked the device until explicitly allowed again.");
+            }
+            foreach (var session in sessions.Values.Where(session => session.DeviceId == id).ToArray()) sessions.Remove(session.Id);
+            return true;
+        }
+    }
+    public PairedDevice? AllowDevice(string id)
+    {
+        lock (gate)
+        {
+            var index = state.Devices.FindIndex(device => device.Id == id && device.RevokedAt is null);
+            if (index < 0) return null;
+            if (!state.Devices[index].BlockedByOwner) return state.Devices[index];
+            state.Devices[index] = state.Devices[index] with { BlockedByOwner = false, ResumeEpoch = Security.RandomToken() };
+            Save(); AddAudit("device.allowed_by_owner", id, "Owner explicitly allowed the device again with its existing grants.");
+            return state.Devices[index];
+        }
+    }
     public void EndAllSessions(bool explicitHostStop = true)
     {
         lock (gate)
         {
             if (explicitHostStop)
             {
-                // Rotate even devices without a live session: a reconnect may be
-                // queued while the host is stopped or an old session has expired.
+                // Block the devices represented by the current live-session
+                // snapshot. Idle pairings were not targets of this action.
+                ExpireSessions();
+                var connected = sessions.Values.Select(session => session.DeviceId).ToHashSet(StringComparer.Ordinal);
+                var newlyBlocked = new List<string>();
                 for (var index = 0; index < state.Devices.Count; index++)
-                    state.Devices[index] = state.Devices[index] with { ResumeEpoch = Security.RandomToken() };
+                {
+                    var device = state.Devices[index];
+                    if (device.RevokedAt is not null) continue;
+                    var block = device.BlockedByOwner || connected.Contains(device.Id);
+                    if (block && !device.BlockedByOwner) newlyBlocked.Add(device.Id);
+                    state.Devices[index] = device with { BlockedByOwner = block, ResumeEpoch = Security.RandomToken() };
+                }
                 Save();
+                foreach (var id in newlyBlocked) AddAudit("device.blocked_by_owner", id, "Owner disconnected all sessions and blocked this connected device until explicitly allowed again.");
             }
             sessions.Clear();
-            AddAudit("sessions.disconnected", null, explicitHostStop ? "All remote sessions disconnected locally; automatic resumption invalidated." : "Host lifecycle ended active sessions; authorized resumption preserved.");
+            AddAudit("sessions.disconnected", null, explicitHostStop ? "All remote sessions disconnected locally; their devices blocked until explicitly allowed again." : "Host lifecycle ended active sessions; authorized resumption preserved.");
         }
     }
     public void AddAudit(string kind, string? deviceId, string detail)
@@ -172,15 +217,65 @@ public sealed class HostState
             File.WriteAllLines(path, audit.Select(e => JsonSerializer.Serialize(e, new JsonSerializerOptions(Json) { WriteIndented = false }))); Security.RestrictFile(path);
         }
     }
+    public int InvalidatePairingsForIdentityRotation()
+    {
+        lock (gate)
+        {
+            sessions.Clear(); invites.Clear();
+            var count = state.Devices.Count(device => device.RevokedAt is null);
+            for (var index = 0; index < state.Devices.Count; index++)
+                state.Devices[index] = state.Devices[index] with { RevokedAt = state.Devices[index].RevokedAt ?? clock.GetUtcNow(), ResumeEpoch = Security.RandomToken(), BlockedByOwner = false };
+            Save();
+            return count;
+        }
+    }
     public string GetSafeFilePath(string name)
     {
         Security.ValidateFileName(name);
+        if (UploadStore.IsReservedName(name)) throw new ArgumentException("That filename is reserved for private upload staging.");
         var settings = Settings;
         if (!settings.FileTransferEnabled || settings.FileTransferRoot is null) throw new UnauthorizedAccessException("File transfer is disabled locally.");
         RejectLinks(settings.FileTransferRoot);
         var path = Path.Combine(settings.FileTransferRoot, name);
-        if (File.Exists(path) || Directory.Exists(path)) RejectLinks(path);
+        if (File.Exists(path) || Directory.Exists(path))
+        {
+            RejectLinks(path);
+            if (OperatingSystem.IsWindows()) ValidateResolvedFileName(name, Path.GetFileName(WindowsLongPath(path)));
+        }
         return path;
+    }
+    internal static void ValidateResolvedFileName(string requested, string resolved)
+    {
+        if (UploadStore.IsReservedName(resolved) || !string.Equals(requested, resolved, StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException("Use the full, non-reserved filename; file aliases are not accepted.");
+    }
+    private static string WindowsLongPath(string path)
+    {
+        var nativePath = path.StartsWith(@"\\?\", StringComparison.Ordinal) ? path : path.StartsWith(@"\\", StringComparison.Ordinal)
+            ? @"\\?\UNC\" + path[2..] : @"\\?\" + path;
+        var required = GetLongPathName(nativePath, null, 0);
+        if (required is 0 or > 32768) throw new UnauthorizedAccessException("The file's full name could not be resolved.");
+        var buffer = new StringBuilder((int)required);
+        var length = GetLongPathName(nativePath, buffer, required);
+        if (length == 0 || length >= required) throw new UnauthorizedAccessException("The file's full name could not be resolved.");
+        return buffer.ToString();
+    }
+    [DllImport("kernel32.dll", EntryPoint = "GetLongPathNameW", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetLongPathName(string path, StringBuilder? buffer, uint length);
+    internal void PublishUpload(string name, string expectedDestination, string staging, Func<bool> authorized)
+    {
+        lock (gate)
+        {
+            if (!authorized()) throw new UnauthorizedAccessException();
+            var destination = GetSafeFilePath(name);
+            var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+            if (!string.Equals(destination, expectedDestination, comparison) ||
+                !string.Equals(Path.GetDirectoryName(destination), Path.GetDirectoryName(staging), comparison) ||
+                !UploadStore.IsOwnedStageName(Path.GetFileName(staging))) throw new UnauthorizedAccessException();
+            RejectLinks(staging);
+            try { File.Move(staging, destination, overwrite: false); }
+            catch (IOException) when (File.Exists(destination) || Directory.Exists(destination)) { throw UploadStore.Exists(); }
+        }
     }
     private static void RejectLinks(string path)
     {
@@ -198,8 +293,17 @@ public sealed class HostState
     }
     private void Save()
     {
-        var path = Path.Combine(directory, "host.json"); var temporary = path + ".tmp";
-        File.WriteAllText(temporary, JsonSerializer.Serialize(state, Json)); Security.RestrictFile(temporary); File.Move(temporary, path, true);
+        var path = Path.Combine(directory, "host.json"); var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            // Create the private file without a permissive creation window and
+            // flush its content (WritePrivateNewFile calls Flush(true)) before
+            // replacing the state name. Directory
+            // metadata and the state/identity pair are not one crash transaction.
+            Security.WritePrivateNewFile(temporary, JsonSerializer.SerializeToUtf8Bytes(state, Json));
+            File.Move(temporary, path, true);
+        }
+        finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }
     private sealed record PersistedState(string HostId, HostSettings Settings, List<PairedDevice> Devices);
     private sealed record PendingInvite(string? DeviceName, DevicePermissions Permissions, DateTimeOffset ExpiresAt);

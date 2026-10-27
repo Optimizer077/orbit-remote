@@ -2,6 +2,52 @@
 
 Changes are documented by preview release. Application/package version `0.1.0` identifies the current development line; `v0.1.0-preview.1` identifies its initial preview distribution. The [validation record](docs/VALIDATION.md) is the source for completed checks, and [TODO.md](TODO.md) tracks remaining work.
 
+## 0.1.0-preview.5 — 2026-10-27
+
+### Hardware video, on by default
+
+- **GPU capture:** Windows hosts capture the screen with DXGI Desktop Duplication on the monitor's GPU: 4.4 ms per changed frame at 3024×1898, and almost nothing for an unchanged screen.
+- **Hardware H.264:** frames are encoded by the GPU through Windows Media Foundation in low-latency mode with no B-frames: 2.5–2.9 ms per 1080p frame, 5.8–7.6 ms at 3024×1898.
+- **Hardware decode:** the viewer decodes with WebCodecs (Chromium uses D3D11VA, VideoToolbox, or VA-API) in 0.5–0.7 ms and draws in 0.2 ms.
+- **Measured live:** 59.3 fps at native 2560×1440 on a real desktop at about 300 KB/s. A 60-second synthetic test drew 3601 of 3601 frames at 60.0 fps (frame interval p95 17.7 ms), and two viewers both held 60 fps. All on one Windows PC with an NVIDIA RTX GPU; click-to-screen latency has not been measured.
+- **Image fallback:** when video can't run, the session uses images. The image path now reuses connections and sends binary frames; Windows hosts pick the smaller of PNG or JPEG for each frame.
+- **Recovery:** video returns about 0.45 s after a restarted host is healthy (1.9 s from stopping it), one-click **Reconnect** takes about 0.42 s, changing quality without restarting the stream about 0.13–0.15 s, and a capture reset leaves a gap of about 0.15 s.
+
+### A better viewer
+
+- **Full-window viewer** with **Fit** / **1:1**, native fullscreen, and pop-out viewer windows.
+- **Display asleep:** when the remote display is asleep or off, the viewer says so instead of showing a frozen picture, releases held keys, and checks again every few seconds. With control permission, **Wake display** sends a wake request (not in view-only sessions; once every 5 s).
+- **Smoothness meter and Connection details** from the viewer toolbar.
+- **Local cursor:** the viewer draws the pointer itself; the host sends cursor shapes separately from the video.
+- Updates **pause while the window is minimized**, and **Reconnect** is one click after a host restart.
+- Keyboard focus is visible, reconnects are announced to screen readers, and the session toolbar no longer intercepts clicks meant for the remote screen.
+
+### Security hardening
+
+- **Locked-down installed app:** Electron fuses disable running as Node.js, `NODE_OPTIONS`, and inspect flags, and the app loads only from its integrity-checked archive. Packaged builds ignore a development renderer URL.
+- **Received files are marked** as downloaded from the internet (Windows Zone.Identifier, macOS quarantine).
+- **A changed device identity is final** and shown clearly. Session-end decisions use typed error codes, never message text.
+- A device you blocked shows **Disconnected by you · Allow again**.
+- The host accepts large request bodies only on upload routes, shuts down and drains within a bound, and caps streams per device and per host.
+
+### Mac
+
+- Modifier keys are applied to remote input on Mac hosts.
+- The Mac app runs from source; there is no signed Mac download yet.
+
+### Known limits
+
+- Mac and Linux hosts send images, not video.
+- Only an NVIDIA hardware encoder has been measured; AMD and Intel encoders are untested.
+- Very busy or noisy screen content can exceed the bitrate target.
+- Video between two computers and click-to-screen latency have not been measured.
+
+### Notes
+
+- Windows binaries only; macOS and Linux run from source.
+- Evidence: see the release notes.
+- Experiments, measured results, failed runs and decisions: [docs/RESULTS.md](docs/RESULTS.md).
+
 ## 0.1.0-preview.4 — 2026-10-26
 
 ### See who is on your computer

@@ -16,14 +16,16 @@ public static class SessionResumeChecks
         check(session.ResumeEpoch == first.ResumeEpoch, "Session response supplies its paired-device resume epoch");
         check(state.EndSession(session.Id), "Local host can stop one session");
         check(state.GetSession(session.Id, first.Id) is null, "Host-stopped session is unavailable");
-        RejectResume(() => state.StartSession(first, null, expectedResumeEpoch: session.ResumeEpoch), "Host stop rejects automatic renewal with the old epoch");
+        RejectOwner(() => state.StartSession(first, null, expectedResumeEpoch: session.ResumeEpoch), "Host stop rejects automatic renewal with the owner-block reason");
 
         state = new HostState(directory, clock);
         first = state.FindDevice(first.Fingerprint)!;
         check(first.ResumeEpoch != session.ResumeEpoch, "Single-session host stop remains effective after process restart");
-        RejectResume(() => state.StartSession(first, null, expectedResumeEpoch: session.ResumeEpoch), "Restart cannot revive a host-stopped resume epoch");
+        RejectOwner(() => state.StartSession(first, null, expectedResumeEpoch: session.ResumeEpoch), "Restart cannot revive a host-stopped resume epoch");
+        RejectOwner(() => state.StartSession(first, null), "Explicit Connect cannot bypass the persisted owner block");
+        first = state.AllowDevice(first.Id)!;
         var manual = state.StartSession(first, null);
-        check(manual.ResumeEpoch == first.ResumeEpoch, "Explicit new connection without a resume epoch is allowed after host stop");
+        check(manual.ResumeEpoch == first.ResumeEpoch, "Explicit new connection is allowed after the local owner allows the device again");
         check(state.EndSession(manual.Id, first.Id), "Remote owner may end its own session");
         var resumed = state.StartSession(first, null, expectedResumeEpoch: manual.ResumeEpoch);
         check(resumed.ResumeEpoch == manual.ResumeEpoch, "Remote session end preserves existing reconnect authorization");
@@ -50,10 +52,13 @@ public static class SessionResumeChecks
         state = new HostState(directory, clock);
         first = state.FindDevice(first.Fingerprint)!; second = state.FindDevice(second.Fingerprint)!;
         check(state.Sessions.Length == 0, "Panic disconnect clears all active sessions");
-        check(first.ResumeEpoch != oldFirstEpoch && second.ResumeEpoch != oldSecondEpoch, "Panic disconnect persistently rotates epochs even for a device with no active session");
-        RejectResume(() => state.StartSession(first, null, expectedResumeEpoch: oldFirstEpoch), "Panic disconnect blocks old resume after restart");
-        RejectResume(() => state.StartSession(second, null, expectedResumeEpoch: oldSecondEpoch), "Panic disconnect also blocks pending reconnect from an inactive device");
-        check(state.StartSession(first, null).ResumeEpoch == first.ResumeEpoch, "Explicit connect remains available after persisted panic disconnect");
+        check(first.ResumeEpoch != oldFirstEpoch && second.ResumeEpoch != oldSecondEpoch, "Panic disconnect rotates all paired resume epochs while only blocking connected devices");
+        RejectOwner(() => state.StartSession(first, null, expectedResumeEpoch: oldFirstEpoch), "Panic disconnect blocks old resume after restart");
+        RejectResume(() => state.StartSession(second, null, expectedResumeEpoch: oldSecondEpoch), "Panic disconnect invalidates a just-expired device's old automatic resume epoch");
+        check(state.StartSession(second, null).ResumeEpoch == second.ResumeEpoch, "Panic disconnect permits explicit Connect by an idle allowed device");
+        RejectOwner(() => state.StartSession(first, null), "Explicit Connect remains blocked after persisted panic disconnect");
+        first = state.AllowDevice(first.Id)!;
+        check(state.StartSession(first, null).ResumeEpoch == first.ResumeEpoch, "Local Allow again restores explicit connection after persisted panic disconnect");
 
         var legacyDirectory = Path.Combine(tempRoot, "legacy-resume-state");
         Directory.CreateDirectory(legacyDirectory);
@@ -75,6 +80,11 @@ public static class SessionResumeChecks
         {
             try { action(); check(false, message); }
             catch (SessionEndedException ex) { check(ex.Message.Contains("Connect again explicitly", StringComparison.Ordinal), message); }
+        }
+        void RejectOwner(Action action, string message)
+        {
+            try { action(); check(false, message); }
+            catch (OwnerEndedException ex) { check(ex.Message == OwnerEndedException.UserMessage, message); }
         }
     }
 

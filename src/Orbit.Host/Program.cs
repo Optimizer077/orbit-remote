@@ -20,21 +20,34 @@ if (string.IsNullOrWhiteSpace(controlToken) || controlToken.Length < 32)
     return 2;
 }
 var loopbackTest = args.Contains("--loopback-test", StringComparer.Ordinal);
+#if ORBIT_DIAGNOSTICS
+DiagnosticSource.Options diagnosticOptions;
+try { diagnosticOptions = DiagnosticSource.PrepareEnvironment(loopbackTest, Environment.GetEnvironmentVariable("ORBIT_DATA_DIR")); }
+catch (Exception ex) when (ex is ArgumentException or PlatformUnavailableException)
+{ Console.Error.WriteLine(ex.Message); return 2; }
+#endif
 using var parentProof = Environment.GetEnvironmentVariable("ORBIT_PARENT_PROOF") == "1"
     ? await ParentProof.ReadBootstrapAsync(Console.In) : null;
 var network = await TailscaleNetwork.DiscoverAsync(loopbackTest);
 var dataDirectory = Environment.GetEnvironmentVariable("ORBIT_DATA_DIR") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OrbitRemote", "host");
 var state = new HostState(Path.GetFullPath(dataDirectory));
-using var identity = new HostIdentity(dataDirectory, state.HostId, network.Address is null ? null : IPAddress.Parse(network.Address));
+using var identity = new HostIdentity(dataDirectory, state.HostId, network.Address is null ? null : IPAddress.Parse(network.Address), allowExpiredForLocalAdministration: true);
+#if ORBIT_DIAGNOSTICS
+await using var platform = DiagnosticSource.Create(diagnosticOptions);
+#else
 await using var platform = PlatformBackendFactory.Create();
+#endif
 var startedAt = DateTimeOffset.UtcNow;
-var remoteAddress = network.Address is null ? null : $"https://{network.Address}:{remotePort}";
+var remoteAddress = network.Address is null || identity.Health.Expired ? null : $"https://{network.Address}:{remotePort}";
+var identityRotationPending = 0;
 var remoteIdentityCache = new ConcurrentDictionary<string, DateTimeOffset>();
 var captureGate = new SemaphoreSlim(1, 1);
 var inputGate = new SemaphoreSlim(1, 1);
 var inputLeases = new InputLeases();
+var frameWaits = new FrameWaitGate();
 
 var builder = WebApplication.CreateBuilder(args.Where(a => a != "--loopback-test").ToArray());
+HostShutdown.Add(builder.Services);
 builder.Logging.AddFilter("Microsoft.AspNetCore", LogLevel.Warning);
 builder.WebHost.ConfigureKestrel(options =>
 {
@@ -45,8 +58,8 @@ builder.WebHost.ConfigureKestrel(options =>
     options.Limits.RequestHeadersTimeout = TimeSpan.FromSeconds(10);
     options.Limits.KeepAliveTimeout = TimeSpan.FromSeconds(30);
     options.Listen(IPAddress.Loopback, controlPort);
-    if (network.Address is not null)
-        options.Listen(IPAddress.Parse(network.Address), remotePort, listener =>
+    if (remoteAddress is not null)
+        options.Listen(IPAddress.Parse(network.Address!), remotePort, listener =>
         {
             listener.UseHttps(new HttpsConnectionAdapterOptions
             {
@@ -83,6 +96,14 @@ builder.Services.AddRateLimiter(options =>
     options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context => RateLimitPartition.GetTokenBucketLimiter(context.Connection.RemoteIpAddress?.ToString() ?? "unknown", _ => new TokenBucketRateLimiterOptions { TokenLimit = 160, TokensPerPeriod = 120, ReplenishmentPeriod = TimeSpan.FromSeconds(1), AutoReplenishment = true, QueueLimit = 0 }));
 });
 var app = builder.Build();
+var shutdown = app.Services.GetRequiredService<HostShutdown>();
+var uploads = new UploadStore(state, UploadMetadata.Create(app.Logger),
+    () => app.Logger.LogWarning("An upload staging file could not be removed; a later startup will retry stale staging cleanup."));
+var cleanupWarning = 0;
+uploads.CleanupStale(DateTimeOffset.UtcNow, () =>
+{
+    if (Interlocked.Exchange(ref cleanupWarning, 1) == 0) app.Logger.LogWarning("Some stale upload staging files could not be cleaned up.");
+});
 
 // The desktop main process owns its child through a private stdin pipe. An
 // unexpected owner exit closes that pipe, so the host cannot outlive its owner.
@@ -111,14 +132,23 @@ if (Environment.GetEnvironmentVariable("ORBIT_PARENT_WATCH") == "1")
 bool IsLocal(HttpContext context) => context.Connection.LocalPort == controlPort;
 IResult LocalOnly(HttpContext context, Func<IResult> action) => IsLocal(context) ? action() : Results.NotFound();
 PairedDevice? Peer(HttpContext context) => context.Items.TryGetValue("peer", out var value) ? value as PairedDevice : null;
-RemoteSession? Session(HttpContext context, string id, Func<DevicePermissions, bool> permission)
+RemoteSession? Session(HttpContext context, string id, Func<DevicePermissions, bool> permission, bool allowStopping = false) =>
+    SessionAccess.FindSession(state, Peer(context), id, permission,
+        identity.Health.Expired || Volatile.Read(ref identityRotationPending) != 0,
+        shutdown.IsStopping || app.Lifetime.ApplicationStopping.IsCancellationRequested, allowStopping);
+async Task<PlatformStatus> PlatformInfo(CancellationToken cancellationToken)
 {
-    var requestPeer = Peer(context);
-    var peer = requestPeer is null ? null : state.FindDevice(requestPeer.Fingerprint);
-    if (peer is null || !permission(peer.Permissions)) return null;
-    var session = state.GetSession(id, peer.Id);
-    return session is not null && permission(session.Permissions) ? session : null;
+    var status = await platform.GetStatusAsync(cancellationToken);
+    return status with { CanLocalCursor = status.CanCapture && VideoStreamEndpoints.CanLocalCursor(platform) };
 }
+object SessionInfo(RemoteSession session) => new
+{
+    session.Id, session.DeviceId, session.DeviceName, session.MonitorId, session.Permissions, session.CreatedAt,
+    session.ExpiresAt, session.LastActivityAt, session.LastInputAt, session.ResumeEpoch,
+    canVideoStream = VideoStreamEndpoints.CanVideoStream, videoCodecs = VideoStreamEndpoints.VideoCodecs,
+    canLocalCursor = VideoStreamEndpoints.CanLocalCursor(platform),
+    canWakeDisplay = DisplayAvailability.CanWake(platform),
+};
 
 app.Use(async (context, next) =>
 {
@@ -128,7 +158,7 @@ app.Use(async (context, next) =>
     if (context.Request.Headers.ContainsKey("Origin") || context.Request.Headers.ContainsKey("Sec-Fetch-Site"))
     { context.Response.StatusCode = 403; await context.Response.WriteAsJsonAsync(new { error = "Browser requests are not accepted. Use the Orbit desktop application." }); return; }
     var requestSize = context.Features.Get<IHttpMaxRequestBodySizeFeature>();
-    if (requestSize is { IsReadOnly: false }) requestSize.MaxRequestBodySize = context.Request.Path.Value?.Contains("/files/", StringComparison.Ordinal) == true ? maxTransferBytes : 16384;
+    if (requestSize is { IsReadOnly: false }) requestSize.MaxRequestBodySize = RequestBodyPolicy.LimitFor(context.Request.Method, context.Request.Path, maxTransferBytes);
     if (IsLocal(context))
     {
         if (!IPAddress.IsLoopback(context.Connection.RemoteIpAddress ?? IPAddress.None) || context.Request.Host.Host != "127.0.0.1") { context.Response.StatusCode = 403; return; }
@@ -140,6 +170,7 @@ app.Use(async (context, next) =>
     }
     else
     {
+        if (identity.Health.Expired || Volatile.Read(ref identityRotationPending) != 0) { context.Response.StatusCode = 503; return; }
         if (!context.Request.IsHttps) { context.Response.StatusCode = 403; return; }
         var certificate = await context.Connection.GetClientCertificateAsync(context.RequestAborted);
         if (!Security.IsClientCertificateUsable(certificate)) { context.Response.StatusCode = 401; return; }
@@ -157,19 +188,7 @@ app.Use(async (context, next) =>
             context.Items["peer"] = peer;
         }
     }
-    try { await next(context); }
-    catch (SessionEndedException ex) { if (!context.Response.HasStarted) { context.Response.StatusCode = 410; await context.Response.WriteAsJsonAsync(new { error = ex.Message, code = "session_ended_by_host" }); } }
-    catch (PlatformUnavailableException ex) { if (!context.Response.HasStarted) { context.Response.StatusCode = 409; await context.Response.WriteAsJsonAsync(new { error = ex.Message, code = ex.Code }); } }
-    catch (ArgumentException ex) { if (!context.Response.HasStarted) { context.Response.StatusCode = 400; await context.Response.WriteAsJsonAsync(new { error = ex.Message }); } }
-    catch (UnauthorizedAccessException) { if (!context.Response.HasStarted) { context.Response.StatusCode = 403; await context.Response.WriteAsJsonAsync(new { error = "Access denied or pairing invite invalid." }); } }
-    catch (InvalidOperationException ex) { if (!context.Response.HasStarted) { context.Response.StatusCode = 409; await context.Response.WriteAsJsonAsync(new { error = ex.Message }); } }
-    catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested) { }
-    catch (BadHttpRequestException) { if (!context.Response.HasStarted) context.Response.StatusCode = 400; }
-    catch (Exception ex)
-    {
-        app.Logger.LogError("Request failed ({ExceptionType}).", ex.GetType().Name);
-        if (!context.Response.HasStarted) { context.Response.StatusCode = 500; await context.Response.WriteAsJsonAsync(new { error = "The host could not complete this operation. Check local status and audit events." }); }
-    }
+    await SessionAccess.InvokeWithErrorsAsync(context, next, app.Logger);
 });
 app.UseRateLimiter();
 
@@ -186,21 +205,55 @@ app.MapGet("/api/parent-proof", (HttpContext context) =>
 app.MapGet("/api/status", async (HttpContext context) =>
 {
     if (!IsLocal(context)) return Results.NotFound();
-    return Results.Ok(new { state.HostId, state.HostName, version = "0.1.0", startedAt, remoteEnabled = remoteAddress is not null, remoteAddress, certificateFingerprint = identity.Fingerprint, transport = network, platform = await platform.GetStatusAsync(context.RequestAborted), settings = state.Settings, pairedDevices = state.Devices, sessions = state.Sessions });
+    return Results.Ok(new { state.HostId, state.HostName, version = "0.1.0", startedAt,
+#if ORBIT_DIAGNOSTICS
+        diagnosticSource = DiagnosticSource.Status(platform),
+#endif
+        remoteEnabled = remoteAddress is not null && !identity.Health.Expired && Volatile.Read(ref identityRotationPending) == 0, remoteAddress, certificateFingerprint = identity.Fingerprint, identity = identity.Health, transport = network, platform = await PlatformInfo(context.RequestAborted), settings = state.Settings, pairedDevices = state.Devices, sessions = state.Sessions });
 });
 app.MapGet("/api/peers", (HttpContext context) => LocalOnly(context, () => Results.Ok(state.Devices)));
 app.MapGet("/api/tailnet-peers", (HttpContext context) => LocalOnly(context, () => Results.Ok(network.Peers)));
 app.MapGet("/api/audit", (HttpContext context) => LocalOnly(context, () => Results.Ok(state.Audit)));
 app.MapGet("/api/settings", (HttpContext context) => LocalOnly(context, () => Results.Ok(state.Settings)));
 app.MapPut("/api/settings", (HttpContext context, HostSettings settings) => LocalOnly(context, () => { state.UpdateSettings(settings); return Results.Ok(state.Settings); }));
-app.MapGet("/api/identity/export", (HttpContext context) => LocalOnly(context, () => Results.Ok(identity.ExportForLocalController())));
-app.MapGet("/api/client-identity", (HttpContext context) => LocalOnly(context, () => Results.Ok(identity.ExportForLocalController())));
-app.MapPost("/api/invites", (HttpContext context, InviteRequest request) => LocalOnly(context, () => remoteAddress is null ? Results.Conflict(new { error = "Tailscale is unavailable. Pairing is disabled." }) : Results.Ok(state.CreateInvite(request, remoteAddress, identity.Fingerprint))));
+app.MapGet("/api/identity/export", (HttpContext context) => LocalOnly(context, () => identity.Health.Expired ? Results.Conflict(new { error = "Host identity expired. Rotate it locally and pair devices again before connecting." }) : Volatile.Read(ref identityRotationPending) != 0 ? Results.Conflict(new { error = "Identity recovery is in progress." }) : Results.Ok(identity.ExportForLocalController())));
+app.MapGet("/api/client-identity", (HttpContext context) => LocalOnly(context, () => identity.Health.Expired ? Results.Conflict(new { error = "Host identity expired. Rotate it locally and pair devices again before connecting." }) : Volatile.Read(ref identityRotationPending) != 0 ? Results.Conflict(new { error = "Identity recovery is in progress." }) : Results.Ok(identity.ExportForLocalController())));
+app.MapPost("/api/identity/rotate", async (HttpContext context, IdentityRotationRequest request) =>
+{
+    if (!IsLocal(context)) return Results.NotFound();
+    if (!request.ConfirmRePair) return Results.BadRequest(new { error = "Confirm that every device must pair again before rotating this identity." });
+    if (!Security.TokenEquals(request.ExpectedFingerprint, identity.Fingerprint)) return Results.Conflict(new { error = "The current identity changed. Review its fingerprint and confirm again." });
+    if (Interlocked.CompareExchange(ref identityRotationPending, 1, 0) != 0) return Results.Conflict(new { error = "Identity recovery is already in progress." });
+    try
+    {
+        state.EndAllSessions(explicitHostStop: false);
+        await inputGate.WaitAsync(context.RequestAborted);
+        try { await platform.ReleaseInputsAsync(context.RequestAborted); inputLeases.Clear(); } finally { inputGate.Release(); }
+        var revoked = 0;
+        identity.Rotate(request.ExpectedFingerprint, () => revoked = state.InvalidatePairingsForIdentityRotation());
+        state.AddAudit("identity.rotated", null, $"Identity rotated; {revoked} pairings revoked. Every device must pair again.");
+        context.Response.OnCompleted(() => { app.Lifetime.StopApplication(); return Task.CompletedTask; });
+        return Results.Accepted(value: new { state = "restarting", pairingsRevoked = revoked, requiresRePair = true });
+    }
+    catch { Volatile.Write(ref identityRotationPending, 0); throw; }
+});
+app.MapPost("/api/invites", (HttpContext context, InviteRequest request) => LocalOnly(context, () => remoteAddress is null || identity.Health.Expired || Volatile.Read(ref identityRotationPending) != 0 ? Results.Conflict(new { error = "Remote listening is unavailable. Check Tailscale and identity status before pairing." }) : Results.Ok(state.CreateInvite(request, remoteAddress, identity.Fingerprint))));
 app.MapDelete("/api/peers/{id}", async (HttpContext context, string id) =>
 {
     if (!IsLocal(context)) return Results.NotFound();
     if (!state.Revoke(id, out var revokedControllingSession)) return Results.NotFound();
     if (!revokedControllingSession) return Results.NoContent();
+    await inputGate.WaitAsync(context.RequestAborted);
+    try { await platform.ReleaseInputsAsync(context.RequestAborted); inputLeases.Clear(); } finally { inputGate.Release(); }
+    return Results.NoContent();
+});
+app.MapPost("/api/peers/{id}/allow", (HttpContext context, string id) =>
+    LocalOnly(context, () => state.AllowDevice(id) is { } device ? Results.Ok(device) : Results.NotFound()));
+app.MapPost("/api/peers/{id}/block", async (HttpContext context, string id) =>
+{
+    if (!IsLocal(context)) return Results.NotFound();
+    if (!state.BlockDevice(id, out var endedControllingSession)) return Results.NotFound();
+    if (!endedControllingSession) return Results.NoContent();
     await inputGate.WaitAsync(context.RequestAborted);
     try { await platform.ReleaseInputsAsync(context.RequestAborted); inputLeases.Clear(); } finally { inputGate.Release(); }
     return Results.NoContent();
@@ -221,27 +274,9 @@ app.MapPost("/api/pair", async (HttpContext context, PairRequest request) =>
     var device = state.Pair(request, Security.Fingerprint(certificate!));
     return Results.Ok(new { deviceId = device.Id, deviceName = device.Name, hostId = state.HostId, hostName = state.HostName, device.Permissions, certificateFingerprint = identity.Fingerprint });
 }).RequireRateLimiting("pairing");
-app.MapGet("/api/info", async (HttpContext context) => Peer(context) is { } peer ? Results.Ok(new { state.HostId, state.HostName, platform = await platform.GetStatusAsync(context.RequestAborted), permissions = peer.Permissions, settings = new { state.Settings.AllowRemotePower, state.Settings.FileTransferEnabled } }) : Results.NotFound());
-app.MapPost("/api/sessions", async (HttpContext context, SessionRequest request) =>
-{
-    var peer = Peer(context); if (peer is null || !peer.Permissions.View) return Results.StatusCode(403);
-    var status = await platform.GetStatusAsync(context.RequestAborted);
-    if (!status.CanCapture) return Results.Conflict(new { error = "Screen capture is unavailable in the current desktop session.", status.Limitations });
-    if (request.MonitorId is not null && !status.Monitors.Any(m => m.Id == request.MonitorId)) return Results.BadRequest(new { error = "Unknown monitor." });
-    if (peer.Permissions.Control && !request.ViewOnly)
-    {
-        await inputGate.WaitAsync(context.RequestAborted);
-        try
-        {
-            // Do not disturb an existing controller when another request is rejected.
-            if (!state.Sessions.Any(s => s.Permissions.Control)) { await platform.ReleaseInputsAsync(context.RequestAborted); inputLeases.Clear(); }
-            return Results.Ok(state.StartSession(peer, request.MonitorId, request.ViewOnly, request.ResumeEpoch));
-        }
-        finally { inputGate.Release(); }
-    }
-    return Results.Ok(state.StartSession(peer, request.MonitorId, request.ViewOnly, request.ResumeEpoch));
-});
-app.MapGet("/api/sessions/{id}", (HttpContext context, string id) => Session(context, id, p => p.View) is { } session ? Results.Ok(session) : Results.NotFound());
+app.MapGet("/api/info", async (HttpContext context) => Peer(context) is { } peer ? Results.Ok(new { state.HostId, state.HostName, platform = await PlatformInfo(context.RequestAborted), permissions = peer.Permissions, settings = new { state.Settings.AllowRemotePower, state.Settings.FileTransferEnabled } }) : Results.NotFound());
+app.MapSessions(state, platform, Peer, (context, id) => Session(context, id, p => p.View, allowStopping: true), SessionInfo,
+    () => identity.Health.Expired || Volatile.Read(ref identityRotationPending) != 0, inputGate, inputLeases, shutdown);
 app.MapDelete("/api/sessions/{id}", async (HttpContext context, string id) =>
 {
     var deviceId = IsLocal(context) ? null : Peer(context)?.Id;
@@ -251,56 +286,13 @@ app.MapDelete("/api/sessions/{id}", async (HttpContext context, string id) =>
     try { await platform.ReleaseInputsAsync(context.RequestAborted); inputLeases.Clear(); } finally { inputGate.Release(); }
     return Results.NoContent();
 });
-app.MapGet("/api/sessions/{id}/frame", async (HttpContext context, string id) =>
-{
-    var session = Session(context, id, p => p.View); if (session is null) return Results.NotFound();
-    var requestedMonitor = context.Request.Query["monitorId"];
-    if (requestedMonitor.Count > 1) return Results.BadRequest(new { error = "Supply only one monitorId per frame request." });
-    if (context.Request.Query.Keys.Any(key => key is not "monitorId" and not "scale"))
-        return Results.BadRequest(new { error = "Only monitorId and optional scale are supported; frames use PNG." });
-    var requestedScale = context.Request.Query["scale"];
-    if (requestedScale.Count > 1) return Results.BadRequest(new { error = "Supply only one scale per frame request." });
-    var scale = FrameQuality.ParseScale(requestedScale.Count == 0 ? null : requestedScale.ToString());
-    var validators = context.Request.Headers.IfNoneMatch;
-    if (validators.Count > 1) return Results.BadRequest(new { error = "Supply only one If-None-Match validator." });
-    var validator = FrameQuality.ParseConditionalTag(validators.Count == 0 ? null : validators.ToString());
-    // A viewer may select any existing host monitor while sharing its authenticated
-    // control session with other windows; this does not create a virtual display.
-    var monitorId = Security.SelectFrameMonitor(requestedMonitor.Count == 0 ? null : requestedMonitor.ToString(), session.MonitorId);
-    await captureGate.WaitAsync(context.RequestAborted);
-    try
-    {
-        // Recheck after waiting so local revocation also cancels queued captures.
-        if (state.FindDevice(Peer(context)!.Fingerprint) is null || state.GetSession(id, session.DeviceId) is null) return Results.NotFound();
-        var frame = await platform.CaptureAsync(monitorId, context.RequestAborted);
-        if (Session(context, id, p => p.View) is null) return Results.NotFound();
-        var prepared = FrameQuality.Prepare(frame, session.Id, session.ResumeEpoch, monitorId, scale, validator, context.RequestAborted);
-        // Hashing/downscaling can take time: authorization must still hold before
-        // sending either pixels or a conditional heartbeat with cached geometry.
-        if (Session(context, id, p => p.View) is null) return Results.NotFound();
-        context.Response.Headers["X-Orbit-Width"] = frame.Width.ToString(); context.Response.Headers["X-Orbit-Height"] = frame.Height.ToString();
-        context.Response.Headers["X-Orbit-Left"] = frame.Left.ToString(); context.Response.Headers["X-Orbit-Top"] = frame.Top.ToString();
-        context.Response.Headers["X-Orbit-Encoded-Width"] = prepared.EncodedWidth.ToString(); context.Response.Headers["X-Orbit-Encoded-Height"] = prepared.EncodedHeight.ToString();
-        context.Response.Headers["X-Orbit-Scale"] = prepared.Scale.ToString("0.################", System.Globalization.CultureInfo.InvariantCulture);
-        if (prepared.ETag is not null) context.Response.Headers.ETag = prepared.ETag;
-        context.Response.Headers["X-Orbit-Captured-At"] = frame.CapturedUtc.ToString("O");
-        return prepared.NotModified ? Results.StatusCode(StatusCodes.Status304NotModified) : Results.Bytes(prepared.Png, "image/png");
-    }
-    finally { captureGate.Release(); }
-});
-app.MapPost("/api/sessions/{id}/input", async (HttpContext context, string id, RemoteInput input) =>
-{
-    var session = Session(context, id, p => p.Control); if (session is null) return Results.NotFound();
-    await inputGate.WaitAsync(context.RequestAborted);
-    try
-    {
-        if (state.FindDevice(Peer(context)!.Fingerprint) is null || state.GetSession(id, session.DeviceId) is null) return Results.NotFound();
-        await platform.ApplyInputAsync(input, context.RequestAborted);
-        inputLeases.Record(id, input, DateTimeOffset.UtcNow); state.TouchInput(id);
-        return Results.NoContent();
-    }
-    finally { inputGate.Release(); }
-});
+app.MapVideoStream(state, platform, () => identity.Health.Expired || Volatile.Read(ref identityRotationPending) != 0, Peer);
+app.MapFrame(state, platform, (context, id) => Session(context, id, p => p.View, allowStopping: true), Peer,
+    () => identity.Health.Expired || Volatile.Read(ref identityRotationPending) != 0, captureGate, frameWaits, shutdown);
+using var inputShutdown = new InputEndpoints(app, state, platform, (context, id) => Session(context, id, p => p.Control),
+    inputGate, inputLeases, shutdown, message => Console.Error.WriteLine(message));
+app.MapWakeDisplay(state, platform, (context, id) => Session(context, id, p => p.View, allowStopping: true),
+    Peer, () => identity.Health.Expired || Volatile.Read(ref identityRotationPending) != 0, inputGate, shutdown);
 app.MapPost("/api/sessions/{id}/release-inputs", async (HttpContext context, string id) =>
 {
     if (Session(context, id, p => p.Control) is null) return Results.NotFound();
@@ -346,51 +338,15 @@ app.MapPost("/api/sessions/{id}/power", async (HttpContext context, string id, P
     }
     finally { inputGate.Release(); }
 });
-app.MapGet("/api/sessions/{id}/files", (HttpContext context, string id) =>
-{
-    if (Session(context, id, p => p.Files) is null || !state.Settings.FileTransferEnabled) return Results.NotFound();
-    var sentinel = state.GetSafeFilePath("orbit-validation");
-    var files = Directory.EnumerateFiles(Path.GetDirectoryName(sentinel)!).Where(f => (File.GetAttributes(f) & FileAttributes.ReparsePoint) == 0).Take(500).Select(f => new FileInfo(f)).Select(f => new { name = f.Name, size = f.Length, modifiedAt = f.LastWriteTimeUtc }).ToArray();
-    return Results.Ok(files);
-});
-app.MapGet("/api/sessions/{id}/files/{name}", (HttpContext context, string id, string name) =>
-{
-    if (Session(context, id, p => p.Files) is null) return Results.NotFound();
-    var path = state.GetSafeFilePath(name); if (!File.Exists(path)) return Results.NotFound();
-    if (new FileInfo(path).Length > maxTransferBytes) return Results.BadRequest(new { error = "Files are limited to 32 MiB." });
-    state.AddAudit("file.download", Peer(context)!.Id, "A file was downloaded from the configured transfer folder.");
-    return Results.File(path, "application/octet-stream", fileDownloadName: name, enableRangeProcessing: false);
-});
-app.MapPut("/api/sessions/{id}/files/{name}", async (HttpContext context, string id, string name) =>
-{
-    if (Session(context, id, p => p.Files) is null) return Results.NotFound();
-    var path = state.GetSafeFilePath(name);
-    if (File.Exists(path)) return Results.Conflict(new { error = "That file exists. Choose another file name; remote uploads never overwrite files." });
-    // CreateNew prevents remote replacement of an existing path. No arbitrary filesystem access.
-    await using var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 65536, FileOptions.Asynchronous);
-    Security.RestrictFile(path);
-    try
-    {
-        var buffer = new byte[65536]; long total = 0; int read;
-        while ((read = await context.Request.Body.ReadAsync(buffer, context.RequestAborted)) > 0)
-        {
-            total += read; if (total > maxTransferBytes) throw new BadHttpRequestException("File too large.", 413);
-            if (state.FindDevice(Peer(context)!.Fingerprint) is null || Session(context, id, p => p.Files) is null || !state.Settings.FileTransferEnabled) throw new UnauthorizedAccessException();
-            await output.WriteAsync(buffer.AsMemory(0, read), context.RequestAborted);
-        }
-    }
-    catch { await output.DisposeAsync(); File.Delete(path); throw; }
-    state.AddAudit("file.upload", Peer(context)!.Id, "A file was uploaded to the configured transfer folder.");
-    return Results.Created($"/api/sessions/{id}/files/{Uri.EscapeDataString(name)}", new { name, size = output.Length });
-});
+app.MapList(state, (context, id) => Session(context, id, p => p.Files));
+app.MapDownload(state, (context, id) => Session(context, id, p => p.Files), maxTransferBytes, shutdown);
+app.MapUpload(state, uploads, (context, id) => Session(context, id, p => p.Files), maxTransferBytes, shutdown);
 
-state.AddAudit("host.started", null, network.Mode == "loopback-test" ? "Local integration-test mode. Remote listener is loopback only." : network.Address is null ? "Host started offline. No remote listener." : "Host started on verified Tailscale address.");
-app.Lifetime.ApplicationStopping.Register(() =>
-{
-    state.EndAllSessions(false);
-    try { platform.ReleaseInputsAsync().GetAwaiter().GetResult(); }
-    catch (Exception ex) { app.Logger.LogWarning("Best-effort input release during shutdown failed ({ExceptionType}).", ex.GetType().Name); }
-});
+state.AddAudit("host.started", null, identity.Health.Expired ? "Host identity expired. Only local recovery is available." : network.Mode == "loopback-test" ? "Local integration-test mode. Remote listener is loopback only." : remoteAddress is null ? "Host started offline. No remote listener." : "Host started on verified Tailscale address.");
+// Keep authorization metadata available during the bounded terminal drain:
+// otherwise a new frame/stream/control request observes a misleading 404.
+// Input/data routes already refuse work once ApplicationStopping is cancelled.
+app.Lifetime.ApplicationStopped.Register(() => state.EndAllSessions(false));
 var inputSafetyTask = Task.Run(async () =>
 {
     var activeControl = false;
@@ -420,9 +376,17 @@ var inputSafetyTask = Task.Run(async () =>
     }
 });
 Console.WriteLine($"Orbit Remote control: http://127.0.0.1:{controlPort}");
-Console.WriteLine(remoteAddress is null ? "Remote listening disabled: Tailscale unavailable." : $"Remote mTLS listener: {remoteAddress} ({network.Mode})");
-await app.RunAsync();
-await inputSafetyTask;
+Console.WriteLine(remoteAddress is null ? "Remote listening disabled. Check Tailscale and identity status." : $"Remote mTLS listener: {remoteAddress} ({network.Mode})");
+try { await app.RunAsync(); }
+finally
+{
+    // A final serialized release also covers cleanup/callback failures and a
+    // late native completion while the host was tearing down.
+    try { await inputShutdown.ReleaseAsync(); }
+    catch (Exception ex) { Console.Error.WriteLine($"Best-effort final input release failed ({ex.GetType().Name})."); }
+}
+try { await inputSafetyTask.WaitAsync(TimeSpan.FromSeconds(2)); }
+catch (TimeoutException) { Console.Error.WriteLine("Input safety worker did not stop within its shutdown budget."); }
 return 0;
 
 static int PortFromEnvironment(string name, int defaultPort)

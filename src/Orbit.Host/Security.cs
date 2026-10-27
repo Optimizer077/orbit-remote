@@ -103,11 +103,16 @@ public sealed class HostIdentity : IDisposable
     // releases it. The durable profile identity remains protected separately.
     private static X509KeyStorageFlags KeyFlags => X509KeyStorageFlags.Exportable |
         (OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() ? X509KeyStorageFlags.UserKeySet : X509KeyStorageFlags.EphemeralKeySet);
+    private readonly string identityPath;
+    private readonly string hostId;
+    private readonly IPAddress? address;
     public X509Certificate2 Certificate { get; }
     public string Fingerprint => Security.Fingerprint(Certificate);
-    public HostIdentity(string directory, string hostId, IPAddress? address)
+    public IdentityHealth Health => IdentityHealth.FromCertificate(Certificate);
+    public HostIdentity(string directory, string hostId, IPAddress? address, bool allowExpiredForLocalAdministration = false)
     {
-        var path = Path.Combine(directory, OperatingSystem.IsWindows() ? "identity.dpapi" : "identity.pfx");
+        this.hostId = hostId; this.address = address;
+        var path = identityPath = Path.Combine(directory, OperatingSystem.IsWindows() ? "identity.dpapi" : "identity.pfx");
         if (File.Exists(path))
         {
             var encoded = File.ReadAllBytes(path);
@@ -117,14 +122,7 @@ public sealed class HostIdentity : IDisposable
         }
         else
         {
-            using var rsa = RSA.Create(3072);
-            var request = new CertificateRequest($"CN=Orbit Remote {hostId}", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
-            request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
-            request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.KeyEncipherment, true));
-            request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new("1.3.6.1.5.5.7.3.1"), new("1.3.6.1.5.5.7.3.2") }, false));
-            var san = new SubjectAlternativeNameBuilder(); san.AddIpAddress(IPAddress.Loopback); if (address is not null) san.AddIpAddress(address); request.CertificateExtensions.Add(san.Build());
-            using var created = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddYears(2));
-            var pfx = created.Export(X509ContentType.Pfx);
+            var pfx = CreatePfx();
             try
             {
                 Security.WritePrivateNewFile(path, OperatingSystem.IsWindows() ? WindowsSecret.Protect(pfx) : pfx);
@@ -132,12 +130,42 @@ public sealed class HostIdentity : IDisposable
             }
             finally { CryptographicOperations.ZeroMemory(pfx); }
         }
-        if (Certificate.NotAfter.ToUniversalTime() <= DateTime.UtcNow) throw new InvalidOperationException("Host identity expired. Rotate the identity and pair devices again.");
+        if (Health.Expired && !allowExpiredForLocalAdministration) { Certificate.Dispose(); throw new InvalidOperationException("Host identity expired. Rotate the identity and pair devices again."); }
     }
     public object ExportForLocalController()
     {
+        if (Health.Expired) throw new InvalidOperationException("Host identity expired. Rotate it locally and pair devices again before connecting.");
         using var rsa = Certificate.GetRSAPrivateKey() ?? throw new InvalidOperationException("Host identity is missing its private key.");
         return new { certificatePem = Certificate.ExportCertificatePem(), privateKeyPem = rsa.ExportPkcs8PrivateKeyPem(), fingerprint = Fingerprint };
+    }
+    // The live listener retains the old certificate until graceful restart. Never
+    // overwrite its object or silently update peers' certificate pins.
+    public void Rotate(string? expectedFingerprint, Action invalidatePairings)
+    {
+        if (!Security.TokenEquals(expectedFingerprint, Fingerprint)) throw new ArgumentException("The current identity changed. Review its fingerprint and confirm again.");
+        var temporary = identityPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        var pfx = CreatePfx();
+        try
+        {
+            Security.WritePrivateNewFile(temporary, OperatingSystem.IsWindows() ? WindowsSecret.Protect(pfx) : pfx);
+            // Flush revoked pairing state before replacing the identity. File
+            // flushing does not make both directory renames a crash transaction.
+            // A failed replacement may require another local attempt.
+            invalidatePairings();
+            File.Move(temporary, identityPath, true);
+        }
+        finally { CryptographicOperations.ZeroMemory(pfx); if (File.Exists(temporary)) File.Delete(temporary); }
+    }
+    private byte[] CreatePfx()
+    {
+        using var rsa = RSA.Create(3072);
+        var request = new CertificateRequest($"CN=Orbit Remote {hostId}", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
+        request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.KeyEncipherment, true));
+        request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new("1.3.6.1.5.5.7.3.1"), new("1.3.6.1.5.5.7.3.2") }, false));
+        var san = new SubjectAlternativeNameBuilder(); san.AddIpAddress(IPAddress.Loopback); if (address is not null) san.AddIpAddress(address); request.CertificateExtensions.Add(san.Build());
+        using var created = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddYears(2));
+        return created.Export(X509ContentType.Pfx);
     }
     public void Dispose() => Certificate.Dispose();
 }

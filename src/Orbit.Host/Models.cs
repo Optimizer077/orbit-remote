@@ -4,7 +4,7 @@ public sealed record DevicePermissions(bool View = false, bool Control = false, 
 {
     public bool IsValid => View && (!Power || Control);
 }
-public sealed record PairedDevice(string Id, string Name, string Fingerprint, DevicePermissions Permissions, DateTimeOffset CreatedAt, DateTimeOffset? RevokedAt = null, string? ResumeEpoch = null);
+public sealed record PairedDevice(string Id, string Name, string Fingerprint, DevicePermissions Permissions, DateTimeOffset CreatedAt, DateTimeOffset? RevokedAt = null, string? ResumeEpoch = null, bool BlockedByOwner = false);
 public sealed record HostSettings(bool AllowRemotePower = false, bool FileTransferEnabled = false, string? FileTransferRoot = null, string? HostName = null);
 public sealed record InviteRequest(string? DeviceName, DevicePermissions Permissions);
 public sealed record PairRequest(string Secret, string DeviceName);

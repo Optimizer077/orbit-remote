@@ -128,10 +128,10 @@ export function ViewedBanner({ sessions, onEndOne, onEndAll, busy = false, initi
           onClick={() => setMenuOpen(open => !open)}>
           Devices <span className="viewed-count">{sessions.length}</span><ChevronDown size={15} className="viewed-chevron" aria-hidden="true" />
         </button>
-        <button type="button" className="viewed-btn viewed-btn-end" disabled={busy} onClick={onEndAll}>
+        <button type="button" className="viewed-btn viewed-btn-end" disabled={busy} title="Disconnect and block the currently connected devices until you allow them again." onClick={onEndAll}>
           {endIcon}{busy ? 'Disconnecting…' : 'Disconnect all'}
         </button>
-      </> : <button type="button" className="viewed-btn viewed-btn-end" disabled={busy} onClick={() => onEndOne(sessions[0].id)}
+      </> : <button type="button" className="viewed-btn viewed-btn-end" disabled={busy} title="End and block this device until you allow it again." onClick={() => onEndOne(sessions[0].id)}
         aria-label={`End session with ${names[0]}`}>
         {endIcon}{busy ? 'Ending…' : 'End session'}
       </button>}
@@ -147,7 +147,7 @@ export function ViewedBanner({ sessions, onEndOne, onEndAll, busy = false, initi
               <span className="viewed-row-name">{names.filter(name => name === names[index]).length > 1 ? names.indexOf(names[index]) === index ? `${names[index]} · ${names.filter(name => name === names[index]).length} sessions` : `Session ${names.slice(0, index + 1).filter(name => name === names[index]).length}` : names[index]}</span>
               <span className="viewed-row-meta">{s.controlling ? 'Controlling' : 'Viewing'}{seconds !== null && <> · <span aria-hidden="true" className="viewed-row-time">{clock(seconds)}</span><span className="viewed-sr">for {spoken(seconds)}</span></>}</span>
             </span>
-            <button type="button" className="viewed-btn viewed-btn-end small" disabled={busy} onClick={() => onEndOne(s.id)}
+            <button type="button" className="viewed-btn viewed-btn-end small" disabled={busy} title="End and block this device until you allow it again." onClick={() => onEndOne(s.id)}
               aria-label={`End session with ${names[index]}`}>End</button>
           </li>;
         })}

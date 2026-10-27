@@ -6,6 +6,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Security.Authentication;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
@@ -22,6 +23,19 @@ void Reject(Action action, string message)
     checks++;
     try { action(); failures.Add(message); } catch (Exception ex) when (ex is ArgumentException or UnauthorizedAccessException or InvalidOperationException) { }
 }
+// Opt-in for machines the suite must not touch (for example a developer's own desktop):
+// ORBIT_TEST_SKIP_NATIVE_DESKTOP=1 skips only the live DXGI capture group and the direct native-input probes.
+// Unset, every check runs exactly as before.
+var skipNativeDesktop = Environment.GetEnvironmentVariable("ORBIT_TEST_SKIP_NATIVE_DESKTOP") == "1";
+var skippedChecks = new List<string>();
+bool SkipNativeDesktop(string name)
+{
+    if (!skipNativeDesktop) return false;
+    skippedChecks.Add(name);
+    Console.WriteLine("SKIPPED (ORBIT_TEST_SKIP_NATIVE_DESKTOP): " + name);
+    return true;
+}
+void NativeInputReject(Action action, string message) { if (!SkipNativeDesktop(message)) Reject(action, message); }
 // macOS exposes /var as a link to /private/var. Resolve the existing temp
 // ancestors before sandbox tests so they do not intentionally fail link guards.
 var temporaryBase = CanonicalDirectory(Path.GetTempPath());
@@ -32,6 +46,17 @@ Task<string>? hostOutput = null;
 Task<string>? hostError = null;
 try
 {
+    if (typeof(HostState).Assembly.GetCustomAttribute<AssemblyConfigurationAttribute>()?.Configuration == "Diagnostic")
+    {
+        // Diagnostic hosts never become real-desktop hosts. Run their explicit
+        // source suite here; the complete production suite runs in Debug/Release.
+        await DiagnosticSourceChecks.RunAsync(Check, temporaryRoot);
+        await DiagnosticSourceHttpChecks.RunAsync(Check, temporaryRoot);
+        await DiagnosticSourceChecks.CaptureBusyAsync(Check);
+        foreach (var failure in failures) Console.Error.WriteLine("FAIL: " + failure);
+        Console.WriteLine($"{checks - failures.Count}/{checks} Diagnostic source checks passed.");
+        return failures.Count == 0 ? 0 : 1;
+    }
     Check(Security.IsTailscaleAddress(IPAddress.Parse("100.64.0.1")), "Tailscale lower boundary is accepted");
     Check(Security.IsTailscaleAddress(IPAddress.Parse("100.127.255.255")), "Tailscale upper boundary is accepted");
     foreach (var ip in new[] { "100.63.255.255", "100.128.0.0", "192.168.1.1", "127.0.0.1", "::1", "fd7a:115c:a1e1::1" }) Check(!Security.IsTailscaleAddress(IPAddress.Parse(ip)), "Non-tailnet IP rejected: " + ip);
@@ -66,8 +91,26 @@ try
 
     SessionResumeChecks.Run(Check, Reject, temporaryRoot);
     SessionIsolationChecks.Run(Check, temporaryRoot);
+    await OwnerBlockChecks.RunAsync(Check, temporaryRoot);
+    await SessionAccessChecks.RunAsync(Check, temporaryRoot);
+    await DisplayAvailabilityChecks.RunAsync(Check, temporaryRoot);
+    await DiagnosticSourceChecks.RunAsync(Check, temporaryRoot);
+    await DiagnosticSourceHttpChecks.RunAsync(Check, temporaryRoot);
+    IdentityHealthChecks.Run(Check, Reject, temporaryRoot);
     await ParentProofChecks.RunAsync(Check, Reject);
+    await RequestBodyPolicyChecks.RunAsync(Check);
+    await UploadChecks.RunAsync(Check, temporaryRoot);
+    await StreamAdmissionChecks.RunAsync(Check);
     FrameQualityChecks.Run(Check, Reject);
+    FrameEncodingChecks.Run(Check, Reject);
+    JpegEncoderChecks.Run(Check);
+    WindowsSessionChecks.Run(Check);
+    if (!SkipNativeDesktop("DxgiCaptureChecks.Run")) DxgiCaptureChecks.Run(Check);
+    await SharedMonitorChecks.RunAsync(Check, Reject);
+    PointerFeedChecks.Run(Check);
+    await GpuSharedMonitorChecks.RunAsync(Check);
+    await FrameWaitChecks.RunAsync(Check, Reject);
+    VideoStreamChecks.Run(Check);
     var stateDir = Path.Combine(temporaryRoot, "unit-state");
     var state = new HostState(stateDir);
     Reject(() => state.CreateInvite(new(null, new()), "https://127.0.0.1:47832", "pin"), "No-permissions invitation rejected");
@@ -109,10 +152,10 @@ try
     {
         var status = await backend.GetStatusAsync();
         Check(!string.IsNullOrWhiteSpace(status.OperatingSystem) && status.Limitations is not null, "Native backend reports honest status without changing desktop");
-        Reject(() => backend.ApplyInputAsync(new("key", Key: "forged;shutdown", IsDown: true)).GetAwaiter().GetResult(), "Native backend rejects unrecognized keyboard codes without injecting input");
-        Reject(() => backend.ApplyInputAsync(new("pointerButton", Button: "left;touch", IsDown: true)).GetAwaiter().GetResult(), "Native backend rejects unrecognized mouse buttons without moving pointer");
-        Reject(() => backend.ApplyInputAsync(new("pointerMove", X: int.MinValue, Y: int.MinValue)).GetAwaiter().GetResult(), "Native backend rejects pointer coordinates outside all monitors");
-        Reject(() => backend.ApplyInputAsync(new("arbitrary-command")).GetAwaiter().GetResult(), "Native backend rejects unsupported event kinds");
+        NativeInputReject(() => backend.ApplyInputAsync(new("key", Key: "forged;shutdown", IsDown: true)).GetAwaiter().GetResult(), "Native backend rejects unrecognized keyboard codes without injecting input");
+        NativeInputReject(() => backend.ApplyInputAsync(new("pointerButton", Button: "left;touch", IsDown: true)).GetAwaiter().GetResult(), "Native backend rejects unrecognized mouse buttons without moving pointer");
+        NativeInputReject(() => backend.ApplyInputAsync(new("pointerMove", X: int.MinValue, Y: int.MinValue)).GetAwaiter().GetResult(), "Native backend rejects pointer coordinates outside all monitors");
+        NativeInputReject(() => backend.ApplyInputAsync(new("arbitrary-command")).GetAwaiter().GetResult(), "Native backend rejects unsupported event kinds");
     }
 
     // Codec tests use synthetic pixels only; no desktop capture or real input is performed.
@@ -165,6 +208,8 @@ try
     info.Environment["ORBIT_CONTROL_PORT"] = controlPort.ToString(); info.Environment["ORBIT_REMOTE_PORT"] = remotePort.ToString();
     info.Environment["ORBIT_PARENT_WATCH"] = "1";
     info.Environment["ORBIT_PARENT_PROOF"] = "1";
+    var diagnosticConfiguration = typeof(HostState).Assembly.GetCustomAttribute<AssemblyConfigurationAttribute>()?.Configuration == "Diagnostic";
+    if (!diagnosticConfiguration) info.Environment["ORBIT_DIAGNOSTIC_SYNTHETIC"] = "1";
     var parentProofKey = Security.RandomToken();
     host = Process.Start(info) ?? throw new InvalidOperationException("Test host failed to launch.");
     await host.StandardInput.WriteLineAsync(JsonSerializer.Serialize(new { version = 1, proofKey = parentProofKey }));
@@ -180,6 +225,12 @@ try
         await Task.Delay(100);
     }
     Check(ready, "Host starts on loopback-test listeners");
+    var localStatus = await local.GetFromJsonAsync<JsonElement>("/api/status");
+    if (!diagnosticConfiguration)
+        Check(!localStatus.TryGetProperty("diagnosticSource", out _) && localStatus.GetProperty("platform").GetProperty("operatingSystem").GetString() != "Windows Diagnostic",
+            "Actual normal-build subprocess ignores the diagnostic opt-in and exposes no source selector/status");
+    Check(localStatus.GetProperty("platform").GetProperty("canLocalCursor").ValueKind is JsonValueKind.True or JsonValueKind.False,
+        "Privileged host status explicitly advertises the negotiated local-cursor capability");
     using (var noBearer = new HttpClient { BaseAddress = local.BaseAddress })
     using (var challengeRequest = new HttpRequestMessage(HttpMethod.Get, "/api/parent-proof"))
     {
@@ -216,11 +267,27 @@ try
     var pairJson = await pairResponse.Content.ReadFromJsonAsync<JsonElement>();
     Check((await remote.GetAsync("/api/info")).IsSuccessStatusCode, "Paired actual TLS certificate authorizes remote access");
     var remoteInfo = await remote.GetFromJsonAsync<JsonElement>("/api/info");
+    var localCursorCapability = remoteInfo.GetProperty("platform").GetProperty("canLocalCursor").GetBoolean();
+    Check(remoteInfo.GetProperty("platform").GetProperty("displayState").GetString() is "on" or "off" or "dimmed" or "unknown"
+        && remoteInfo.GetProperty("platform").GetProperty("canWakeDisplay").ValueKind is JsonValueKind.True or JsonValueKind.False,
+        "Real mTLS platform info advertises bounded display state and explicit wake capability");
+    Check(localCursorCapability == localStatus.GetProperty("platform").GetProperty("canLocalCursor").GetBoolean(),
+        "Paired remote info preserves the same gated local-cursor capability as local status");
     if (remoteInfo.GetProperty("platform").GetProperty("canCapture").GetBoolean())
     {
         var startResponse = await remote.PostAsJsonAsync("/api/sessions", new { viewOnly = true }); startResponse.EnsureSuccessStatusCode();
         var sessionJson = await startResponse.Content.ReadFromJsonAsync<JsonElement>();
         var sessionId = sessionJson.GetProperty("id").GetString();
+        Check(sessionJson.GetProperty("canLocalCursor").GetBoolean() == localCursorCapability && sessionJson.GetProperty("canVideoStream").ValueKind is JsonValueKind.True or JsonValueKind.False,
+            "Session creation advertises cursor/video capabilities while retaining the session identity and grants");
+        Check(sessionJson.GetProperty("canWakeDisplay").ValueKind is JsonValueKind.True or JsonValueKind.False
+            && !sessionJson.GetProperty("permissions").GetProperty("control").GetBoolean(),
+            "Real mTLS session wake capability does not grant Control to a view-only device");
+        Check((await remote.PostAsync($"/api/sessions/{sessionId}/wake-display", null)).StatusCode == HttpStatusCode.Forbidden,
+            "Real mTLS view-only wake is denied before the native provider");
+        var sessionStatus = await remote.GetFromJsonAsync<JsonElement>($"/api/sessions/{sessionId}");
+        Check(sessionStatus.GetProperty("canLocalCursor").GetBoolean() == localCursorCapability && sessionStatus.GetProperty("resumeEpoch").GetString() == sessionJson.GetProperty("resumeEpoch").GetString(),
+            "Session status retains capability negotiation and automatic-resume authorization");
         Check((await remote.PostAsJsonAsync($"/api/sessions/{sessionId}/input", new { kind = "key", key = "KeyA", isDown = true })).StatusCode == HttpStatusCode.NotFound, "View-only device cannot inject input");
         Check((await remote.GetAsync($"/api/sessions/{sessionId}/clipboard")).StatusCode == HttpStatusCode.NotFound, "View-only device cannot read clipboard");
         Check((await remote.GetAsync($"/api/sessions/{sessionId}/files")).StatusCode == HttpStatusCode.NotFound, "View-only device cannot list files");
@@ -228,7 +295,14 @@ try
         Check((await remote.GetAsync($"/api/sessions/{sessionId}/frame?monitorId=orbit-nonexistent-monitor")).StatusCode == HttpStatusCode.BadRequest, "Unknown monitor is rejected by the native backend without capturing a display");
         Check((await remote.GetAsync($"/api/sessions/{sessionId}/frame?scale=NaN")).StatusCode == HttpStatusCode.BadRequest, "Nonfinite scale is rejected before capture");
         Check((await remote.GetAsync($"/api/sessions/{sessionId}/frame?scale=0.5&scale=1")).StatusCode == HttpStatusCode.BadRequest, "Multiple scale values are rejected before capture");
-        Check((await remote.GetAsync($"/api/sessions/{sessionId}/frame?format=jpeg")).StatusCode == HttpStatusCode.BadRequest, "Unagreed lossy format is not silently accepted");
+        Check((await remote.GetAsync($"/api/sessions/{sessionId}/frame?format=webp")).StatusCode == HttpStatusCode.BadRequest, "Unknown frame codec is rejected before capture");
+        Check((await remote.GetAsync($"/api/sessions/{sessionId}/frame?quality=NaN")).StatusCode == HttpStatusCode.BadRequest, "Noninteger quality is rejected before capture");
+        Check((await remote.GetAsync($"/api/sessions/{sessionId}/frame?quality=50&quality=75")).StatusCode == HttpStatusCode.BadRequest, "Duplicate quality is rejected before capture");
+        Check((await remote.GetAsync($"/api/sessions/{sessionId}/frame?format=jpeg&format=png")).StatusCode == HttpStatusCode.BadRequest, "Duplicate format is rejected before capture");
+        Check((await remote.GetAsync($"/api/sessions/{sessionId}/frame?q=50")).StatusCode == HttpStatusCode.BadRequest, "Ambiguous legacy q alias is rejected; the negotiated field is quality");
+        Check((await remote.GetAsync($"/api/sessions/{sessionId}/frame?wait=10000")).StatusCode == HttpStatusCode.BadRequest, "Positive long-poll wait requires a conditional validator before capture");
+        Check((await remote.GetAsync($"/api/sessions/{sessionId}/frame?wait=NaN")).StatusCode == HttpStatusCode.BadRequest, "Noninteger wait is rejected before capture");
+        Check((await remote.GetAsync($"/api/sessions/{sessionId}/frame?wait=50&wait=100")).StatusCode == HttpStatusCode.BadRequest, "Duplicate wait is rejected before capture");
         using (var invalidTag = new HttpRequestMessage(HttpMethod.Get, $"/api/sessions/{sessionId}/frame"))
         {
             invalidTag.Headers.TryAddWithoutValidation("If-None-Match", "*");
@@ -246,17 +320,94 @@ try
         var previousEpoch = resumable.GetProperty("resumeEpoch").GetString();
         Check(!string.IsNullOrEmpty(previousEpoch), "Session API issues automatic-resume authorization");
         Check((await local.PostAsync("/api/disconnect-all", null)).IsSuccessStatusCode, "Host can explicitly disconnect all sessions");
+        var endedRoutes = new (HttpMethod Method, string Suffix, object? Body)[]
+        {
+            (HttpMethod.Get, "frame", null), (HttpMethod.Get, "stream", null),
+            (HttpMethod.Post, "stream/control", new { ack = 1 }),
+            (HttpMethod.Post, "input", new { kind = "invalid-generated-event" }),
+            (HttpMethod.Post, "power", new { action = "invalid-generated-action" }), (HttpMethod.Post, "release-inputs", null),
+            (HttpMethod.Post, "wake-display", null),
+            (HttpMethod.Get, "clipboard", null), (HttpMethod.Put, "clipboard", new { text = "" }),
+            (HttpMethod.Get, "files", null), (HttpMethod.Get, "files/generated.bin", null),
+            (HttpMethod.Put, "files/generated.bin", null),
+        };
+        foreach (var route in endedRoutes)
+        {
+            using var ended = new HttpRequestMessage(route.Method, $"/api/sessions/{resumable.GetProperty("id").GetString()}/{route.Suffix}");
+            if (route.Body is not null) ended.Content = JsonContent.Create(route.Body);
+            using var terminal = await remote.SendAsync(ended);
+            Check(terminal.StatusCode == HttpStatusCode.Forbidden && (await terminal.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString() == OwnerEndedException.Code,
+                "Real mTLS owner Disconnect all returns a terminal before missing-session renewal: " + route.Method + " " + route.Suffix);
+        }
         var deniedResume = await remote.PostAsJsonAsync("/api/sessions", new { viewOnly = true, resumeEpoch = previousEpoch });
-        Check(deniedResume.StatusCode == HttpStatusCode.Gone, "Host disconnect refuses automatic renewal with HTTP 410");
-        Check((await deniedResume.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString() == "session_ended_by_host", "Host stop carries an explicit terminal reason");
+        Check(deniedResume.StatusCode == HttpStatusCode.Forbidden, "Host disconnect refuses automatic renewal with HTTP 403");
+        Check((await deniedResume.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString() == "ended_by_owner", "Host stop carries an explicit owner-block reason");
+        Check((await remote.PostAsJsonAsync("/api/sessions", new { viewOnly = true })).StatusCode == HttpStatusCode.Forbidden,
+            "Explicit remote Connect cannot bypass the owner's Disconnect all");
+        Check((await local.PostAsync("/api/peers/" + pairJson.GetProperty("deviceId").GetString() + "/allow", null)).IsSuccessStatusCode,
+            "Local owner may explicitly Allow again after Disconnect all");
         var explicitResponse = await remote.PostAsJsonAsync("/api/sessions", new { viewOnly = true }); explicitResponse.EnsureSuccessStatusCode();
         var explicitSession = await explicitResponse.Content.ReadFromJsonAsync<JsonElement>();
         Check(explicitSession.GetProperty("resumeEpoch").GetString() != previousEpoch, "Explicit new connection receives current authorization after host stop");
         Check((await local.DeleteAsync("/api/sessions/" + explicitSession.GetProperty("id").GetString())).IsSuccessStatusCode, "Local host can end one active session");
-        Check((await remote.PostAsJsonAsync("/api/sessions", new { viewOnly = true, resumeEpoch = explicitSession.GetProperty("resumeEpoch").GetString() })).StatusCode == HttpStatusCode.Gone, "Single-session local stop also refuses automatic renewal");
+        Check((await remote.PostAsJsonAsync("/api/sessions", new { viewOnly = true, resumeEpoch = explicitSession.GetProperty("resumeEpoch").GetString() })).StatusCode == HttpStatusCode.Forbidden, "Single-session local stop also refuses automatic renewal");
+    }
+    var pairedId = pairJson.GetProperty("deviceId").GetString()!;
+    Check((await remote.PostAsync("/api/peers/" + pairedId + "/allow", null)).StatusCode == HttpStatusCode.NotFound
+        && (await remote.PostAsync("/api/peers/" + pairedId + "/block", null)).StatusCode == HttpStatusCode.NotFound,
+        "Remote certificate cannot call owner Allow or Block routes");
+    Check((await local.PostAsync("/api/peers/unknown/block", null)).StatusCode == HttpStatusCode.NotFound
+        && (await local.PostAsync("/api/peers/unknown/allow", null)).StatusCode == HttpStatusCode.NotFound,
+        "Owner Block and Allow return404 for unknown devices");
+    Check((await local.PostAsync("/api/peers/" + pairedId + "/block", null)).IsSuccessStatusCode,
+        "Owner can block a known device even after its incoming session row expired");
+    var ownerDenied = await remote.PostAsJsonAsync("/api/sessions", new { viewOnly = true });
+    var ownerReason = await ownerDenied.Content.ReadFromJsonAsync<JsonElement>();
+    Check(ownerDenied.StatusCode == HttpStatusCode.Forbidden && ownerReason.GetProperty("code").GetString() == OwnerEndedException.Code
+        && ownerReason.GetProperty("error").GetString() == OwnerEndedException.UserMessage,
+        "Real mTLS explicit Connect receives the exact403 owner-block contract before native capture");
+    var peerList = await local.GetFromJsonAsync<JsonElement>("/api/peers");
+    Check(peerList.EnumerateArray().Single(peer => peer.GetProperty("id").GetString() == pairedId).GetProperty("blockedByOwner").GetBoolean(),
+        "Local paired-device DTO exposes persisted blockedByOwner state");
+    host.StandardInput.Close();
+    using (var restartExitTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(10))) await host.WaitForExitAsync(restartExitTimeout.Token);
+    Check(host.ExitCode == 0, "Owner-block restart fixture closes its previous owned host cleanly");
+    await hostOutput; await hostError; host.Dispose();
+    parentProofKey = Security.RandomToken();
+    host = Process.Start(info) ?? throw new InvalidOperationException("Restart fixture failed to launch.");
+    await host.StandardInput.WriteLineAsync(JsonSerializer.Serialize(new { version = 1, proofKey = parentProofKey }));
+    await host.StandardInput.FlushAsync();
+    hostOutput = host.StandardOutput.ReadToEndAsync(); hostError = host.StandardError.ReadToEndAsync();
+    ready = false;
+    for (var attempt = 0; attempt < 60; attempt++)
+    {
+        if (host.HasExited) throw new InvalidOperationException("Restart fixture exited early: " + await hostError);
+        try { using var response = await local.GetAsync("/api/peers"); ready = response.IsSuccessStatusCode; if (ready) break; } catch (HttpRequestException) { }
+        await Task.Delay(100);
+    }
+    Check(ready, "Owner-block fixture restarts on the same isolated identity and state");
+    ownerDenied = await remote.PostAsJsonAsync("/api/sessions", new { viewOnly = true });
+    Check(ownerDenied.StatusCode == HttpStatusCode.Forbidden
+        && (await ownerDenied.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString() == OwnerEndedException.Code,
+        "Real mTLS explicit Connect remains owner-blocked after the host process restarts");
+    var allowedResponse = await local.PostAsync("/api/peers/" + pairedId + "/allow", null);
+    var allowedPeer = await allowedResponse.Content.ReadFromJsonAsync<JsonElement>();
+    Check(allowedResponse.IsSuccessStatusCode && !allowedPeer.GetProperty("blockedByOwner").GetBoolean()
+        && allowedPeer.GetProperty("permissions").GetProperty("view").GetBoolean()
+        && !allowedPeer.GetProperty("permissions").GetProperty("control").GetBoolean(),
+        "Local Allow clears the owner block and preserves view-only pairing grants");
+    var afterAllow = await remote.PostAsJsonAsync("/api/sessions", new { viewOnly = true });
+    Check(afterAllow.IsSuccessStatusCode || afterAllow.StatusCode == HttpStatusCode.Conflict,
+        "After local Allow, explicit Connect reaches the current native capability instead of owner denial");
+    if (afterAllow.IsSuccessStatusCode)
+    {
+        var afterAllowSession = await afterAllow.Content.ReadFromJsonAsync<JsonElement>();
+        Check((await remote.DeleteAsync("/api/sessions/" + afterAllowSession.GetProperty("id").GetString())).IsSuccessStatusCode,
+            "Allowed device can end its own test session without blocking itself");
     }
     Check((await remote.PostAsJsonAsync("/api/pair", new { secret = wireSecret, deviceName = "Replay" })).StatusCode == HttpStatusCode.Forbidden, "Actual TLS pairing rejects invitation replay");
     Check((await remote.GetAsync("/api/identity/export")).StatusCode == HttpStatusCode.NotFound, "Remote peer cannot export local private identity");
+    Check((await remote.PostAsJsonAsync("/api/identity/rotate", new { confirmRePair = true, expectedFingerprint = fingerprint })).StatusCode == HttpStatusCode.NotFound, "Paired remote peer cannot rotate the host identity");
     using var otherKey = RSA.Create(2048);
     var req = new CertificateRequest("CN=Unpaired test device", otherKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
     req.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new("1.3.6.1.5.5.7.3.2") }, false));
@@ -266,6 +417,8 @@ try
     unpairedRemote.DefaultRequestHeaders.Add("X-Orbit-Device-Id", pairJson.GetProperty("deviceId").GetString());
     Check((await unpairedRemote.GetAsync("/api/info")).StatusCode == HttpStatusCode.Unauthorized, "Supplying a paired device ID cannot replace actual TLS certificate authentication");
     Check((await local.DeleteAsync("/api/peers/" + pairJson.GetProperty("deviceId").GetString())).IsSuccessStatusCode, "Local device revocation succeeds");
+    Check((await local.PostAsync("/api/peers/" + pairedId + "/allow", null)).StatusCode == HttpStatusCode.NotFound,
+        "Allow again cannot revive a revoked device through the real local API");
     Check((await remote.GetAsync("/api/info")).StatusCode == HttpStatusCode.Unauthorized, "Revocation is enforced on the next request of an existing TLS connection");
     using (var revokedConditional = new HttpRequestMessage(HttpMethod.Get, "/api/sessions/previous-session/frame"))
     {
@@ -281,6 +434,7 @@ try
     using var parentExitTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
     await host.WaitForExitAsync(parentExitTimeout.Token);
     Check(host.ExitCode == 0, "Closing the owner stdin pipe gracefully stops the host without orphaning its listeners");
+    await IdentityHealthChecks.RunIntegrationAsync(Check, temporaryRoot);
 }
 catch (Exception ex) { failures.Add("Unexpected test failure: " + ex); }
 finally
@@ -294,6 +448,7 @@ finally
 }
 foreach (var failure in failures) Console.Error.WriteLine("FAIL: " + failure);
 Console.WriteLine($"{checks - failures.Count}/{checks} security checks passed.");
+if (skipNativeDesktop) Console.WriteLine($"{skippedChecks.Count} item(s) skipped by ORBIT_TEST_SKIP_NATIVE_DESKTOP; {checks} checks executed, {failures.Count} failed.");
 return failures.Count == 0 ? 0 : 1;
 
 static JsonElement DecodeInvite(string uri)

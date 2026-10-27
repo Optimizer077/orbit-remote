@@ -1,0 +1,63 @@
+/* Keyboard shortcut sheet (U7). Theme variables only; fallbacks cover optional v2 tokens. Nothing below 12px. */
+.sh-overlay{
+  position:fixed;inset:0;z-index:1000;display:flex;justify-content:center;align-items:flex-start;
+  padding:min(12vh,104px) 16px 16px;
+  background:color-mix(in srgb,var(--overlay,rgb(0 0 0 / .5)) 55%,transparent);
+  -webkit-backdrop-filter:blur(7px) saturate(1.08);backdrop-filter:blur(7px) saturate(1.08);
+  animation:sh-fade var(--dur-fast,.14s) ease-out both;
+}
+.sh-panel{
+  width:min(580px,100%);max-height:calc(100vh - 32px - min(12vh,104px));
+  display:flex;flex-direction:column;overflow:hidden;color:var(--text);
+  background:var(--surface);border:1px solid color-mix(in srgb,var(--line-strong) 55%,var(--line));border-radius:var(--radius-xl,16px);
+  background-image:linear-gradient(color-mix(in srgb,var(--text) 2.5%,transparent),transparent 80px);
+  box-shadow:var(--elev-4,0 28px 80px -16px rgb(0 0 0 / .5));
+  transform-origin:50% 0;animation:sh-pop .16s var(--ease-spring,cubic-bezier(.2,.9,.3,1.12)) both;
+}
+@keyframes sh-fade{from{opacity:0}to{opacity:1}}
+@keyframes sh-pop{from{opacity:0;transform:translateY(-6px) scale(.97)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){.sh-overlay,.sh-panel{animation:none}}
+
+.sh-head{display:flex;align-items:flex-start;gap:14px;padding:18px 16px 16px 20px;border-bottom:1px solid var(--line)}
+.sh-head-icon{flex:none;width:36px;height:36px;display:grid;place-items:center;border-radius:var(--radius-md,10px);
+  color:var(--accent-text);background:color-mix(in srgb,var(--accent) 14%,var(--surface));border:1px solid color-mix(in srgb,var(--accent) 30%,var(--line))}
+.sh-head-text{flex:1;min-width:0}
+.sh-head h2{margin:0;font-size:var(--fs-title,16px);line-height:22px;font-weight:600;letter-spacing:-.1px;color:var(--text)}
+.sh-head p{margin:3px 0 0;font-size:var(--fs-body-sm,13px);line-height:18px;color:var(--text-muted)}
+.sh-close{flex:none;width:32px;height:32px;display:grid;place-items:center;margin:2px 0 0;padding:0;cursor:pointer;
+  color:var(--text-muted);background:transparent;border:1px solid transparent;border-radius:var(--radius-sm,8px);
+  transition:color var(--dur-fast,.14s),background var(--dur-fast,.14s)}
+.sh-close:hover{color:var(--text);background:var(--surface-hover)}
+.sh-close:focus-visible{outline:2px solid var(--focus-color,var(--accent));outline-offset:2px}
+
+.sh-body{flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:6px 20px 14px}
+.sh-group{padding-top:12px}
+.sh-group+.sh-group{margin-top:4px;border-top:1px solid var(--line)}
+.sh-group-title{margin:0 0 4px;font-size:var(--fs-label,12px);line-height:16px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--text-subtle)}
+.sh-list{list-style:none;margin:0;padding:0}
+.sh-row{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:40px;padding:6px 0}
+.sh-row+.sh-row{border-top:1px dashed color-mix(in srgb,var(--line) 80%,transparent)}
+.sh-label{display:flex;flex-direction:column;gap:1px;min-width:0;font-size:var(--fs-body,14px);line-height:20px;color:var(--text)}
+.sh-note{font-size:var(--fs-meta,12px);line-height:16px;color:var(--text-muted)}
+.sh-keys{flex:none}
+.sh-combos{display:inline-flex;align-items:center;gap:6px}
+.sh-combo{display:inline-flex;align-items:center;gap:4px}
+.sh-or{margin:0 4px 0 2px;font-size:12px;color:var(--text-muted)}
+.sh-kbd{display:inline-flex;align-items:center;justify-content:center;min-width:26px;height:26px;padding:0 7px;
+  font:600 12px/1 ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--text-secondary);
+  background:var(--surface-inset);border:1px solid var(--line-strong);border-bottom-width:2px;border-radius:var(--radius-sm,6px)}
+.sh-kbd.is-glyph{font-family:inherit;font-size:14px}
+.sh-group-note{margin:4px 0 0;padding:8px 10px;font-size:var(--fs-meta,12px);line-height:17px;color:var(--text-secondary);
+  background:var(--surface-inset);border:1px solid var(--line);border-radius:var(--radius-sm,8px)}
+
+.sh-foot{display:flex;align-items:center;gap:8px;padding:10px 20px;border-top:1px solid var(--line);
+  background:var(--surface-inset);font-size:12px;line-height:16px;color:var(--text-muted)}
+.sh-foot>span{display:inline-flex;align-items:center;gap:5px}
+.sh-foot .sh-kbd{min-width:22px;height:22px;padding:0 5px}
+.sh-foot .sh-kbd.is-glyph{font-size:13px}
+.sh-foot-sep{color:var(--text-subtle)}
+.sh-sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+
+@media (max-width:520px){
+  .sh-row{flex-direction:column;align-items:flex-start;gap:6px}
+}

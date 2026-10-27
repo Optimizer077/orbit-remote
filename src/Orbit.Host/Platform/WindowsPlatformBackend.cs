@@ -1,12 +1,13 @@
 using System.ComponentModel;
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 
 namespace Orbit.Host.Platform;
 
-internal sealed class WindowsPlatformBackend : IPlatformBackend
+internal sealed class WindowsPlatformBackend : IPlatformBackend, IFrameChangeSource, IPointerFeed, IGpuVideoSource, IDisplayAvailability
 {
+    private readonly SharedMonitorFrames _frames = new(CreateDuplication, ValidateMonitor);
+    private readonly WindowsDisplayAvailability _display = new();
     private readonly object _inputLock = new();
     private readonly HashSet<ushort> _heldKeys = [];
     private readonly HashSet<string> _heldButtons = [];
@@ -23,12 +24,84 @@ internal sealed class WindowsPlatformBackend : IPlatformBackend
             ready, ready, monitors,
             ["Logged-in interactive desktops only. Lock screens, sign-in, UAC secure desktop and session 0 are not supported by this backend.",
              "Windows integrity isolation prevents input to elevated applications. Launch the desktop agent at the same integrity level as the application you intend to control.",
-             "PNG snapshot transport is a baseline; hardware video encoding and audio are not implemented."],
-             CanScaleFrames: ready && monitors.Count > 0, CanConditionalFrames: ready && monitors.Count > 0));
+             "PNG/JPEG snapshot transport is a baseline; hardware video encoding and audio are not implemented."],
+             CanScaleFrames: ready && monitors.Count > 0, CanConditionalFrames: ready && monitors.Count > 0,
+             CanJpegFrames: ready && monitors.Count > 0 && WicJpegEncoder.IsSupported,
+             CanWaitForFrames: ready && monitors.Count > 0, DisplayState: DisplayState, CanWakeDisplay: ready));
     }
 
-    public Task<ScreenFrame> CaptureAsync(string? monitorId = null, CancellationToken cancellationToken = default) =>
-        Task.Run(() => Capture(monitorId, cancellationToken), cancellationToken);
+    public string DisplayState => _display.State;
+    public bool CanWakeDisplay => SessionState() == "interactive";
+    public Task WakeDisplayAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested(); RequireInteractive();
+        lock (_inputLock)
+        {
+            cancellationToken.ThrowIfCancellationRequested(); RequireInteractive();
+            Send(CreateWakeInput());
+        }
+        return Task.CompletedTask;
+    }
+    // A relative zero-distance move, never an absolute move to desktop(0,0).
+    private static Native.Input CreateWakeInput() => new()
+    { Type = 0, Union = new Native.InputUnion { Mouse = new Native.MouseInput { X = 0, Y = 0, Flags = 1 } } };
+
+    public async Task<ScreenFrame> CaptureAsync(string? monitorId = null, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested(); RequireInteractive();
+        MonitorInfo monitor;
+        using (var dpi = new DpiScope()) monitor = PlatformLimits.SelectMonitor(GetMonitors(), monitorId);
+        PlatformLimits.CheckDimensions(monitor.Width, monitor.Height);
+        var frame = await _frames.CaptureAsync(monitor, cancellationToken);
+        ValidateMonitor(monitor);
+        return frame ?? await Task.Run(() => Capture(monitor.Id, cancellationToken), cancellationToken);
+    }
+
+    public Task WaitForChangeAsync(ScreenFrame observed, int maximumWaitMilliseconds, CancellationToken cancellationToken = default) =>
+        observed.NativeGeneration is null ? Task.Delay(Math.Min(100, maximumWaitMilliseconds), cancellationToken)
+            : _frames.WaitForChangeAsync(observed, maximumWaitMilliseconds, cancellationToken);
+
+    public async Task<PointerSnapshot?> GetPointerAsync(MonitorInfo monitor, string? knownShapeId, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested(); ValidateMonitor(monitor);
+        var pointer = await _frames.GetPointerAsync(monitor, knownShapeId, cancellationToken);
+        ValidateMonitor(monitor); return pointer;
+    }
+
+    public IGpuVideoEncoder? TryOpenEncoder(MonitorInfo monitor, int width, int height, int fps, int bitrateBps)
+    {
+        ValidateMonitor(monitor);
+        if (width <= 0 || height <= 0 || width > monitor.Width || height > monitor.Height || width % 2 != 0 || height % 2 != 0) return null;
+        return _frames.TryOpenEncoder(monitor, width, height, Math.Clamp(fps, 1, 240), Math.Clamp(bitrateBps, 100_000, 100_000_000));
+    }
+
+    private static void ValidateMonitor(MonitorInfo monitor)
+    {
+        RequireInteractive(); using var dpi = new DpiScope();
+        if (!GetMonitors().Any(current => current == monitor)) throw Failure("display-changed", "The requested display changed; capture must be recreated.");
+    }
+
+    private static IMonitorCapture? CreateDuplication(MonitorInfo monitor)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            var gpu = GpuMonitorCapture.TryCreate(monitor, out _);
+            if (gpu is not null) return new SharedGpuMonitorCapture(gpu);
+        }
+        var capture = DxgiCapture.TryCreate(monitor, out _);
+        return capture is null ? null : new DuplicationCapture(capture);
+    }
+
+    private sealed class DuplicationCapture(DxgiCapture capture) : IMonitorCapture
+    {
+        public MonitorUpdate Read(int timeoutMilliseconds, byte[] destination)
+        {
+            if (!OperatingSystem.IsWindows()) throw Failure("unsupported-os", "DXGI requires Windows.");
+            var update = capture.Acquire(timeoutMilliseconds, destination);
+            return new(update.Changed, update.PointerMoved, update.Recovered, capture.Pointer);
+        }
+        public void Dispose() => capture.Dispose();
+    }
 
     private static ScreenFrame Capture(string? monitorId, CancellationToken cancellationToken)
     {
@@ -57,7 +130,7 @@ internal sealed class WindowsPlatformBackend : IPlatformBackend
             RequireInteractive(); // Drop a frame if the user locked or changed secure desktop during capture.
             var data = new byte[checked(monitor.Width * monitor.Height * 4)];
             Marshal.Copy(pixels, data, 0, data.Length);
-            return new ScreenFrame(PngEncoder.EncodeBgra(data, monitor.Width, monitor.Height, cancellationToken),
+            return new ScreenFrame([],
                 monitor.Width, monitor.Height, monitor.Left, monitor.Top, DateTimeOffset.UtcNow, data, monitor.Id);
         }
         finally
@@ -214,14 +287,27 @@ internal sealed class WindowsPlatformBackend : IPlatformBackend
         return Task.CompletedTask;
     }
 
-    public async ValueTask DisposeAsync() => await ReleaseInputsAsync();
+    public async ValueTask DisposeAsync()
+    {
+        try { await ReleaseInputsAsync(); }
+        finally { try { _display.Dispose(); } finally { await _frames.DisposeAsync(); } }
+    }
 
     private static string SessionState()
     {
-        if (!Environment.UserInteractive || Process.GetCurrentProcess().SessionId == 0) return "non-interactive";
-        if (Native.WTSQuerySessionInformation(IntPtr.Zero, Process.GetCurrentProcess().SessionId, 8, out var buffer, out var bytes))
+        if (!Environment.UserInteractive) return "non-interactive";
+        // Process.SessionId builds process metadata on each fresh Process object.
+        // Query this process directly, while checking WTS and desktops live below.
+        var session = ReadProcessSessionId();
+        if (session is null) return "session-state-unavailable";
+        if (session == 0) return "non-interactive";
+        if (Native.WTSQuerySessionInformation(IntPtr.Zero, session.Value, 8, out var buffer, out var bytes))
         {
-            try { if (bytes >= 4 && Marshal.ReadInt32(buffer) != 0) return "disconnected"; }
+            try
+            {
+                if (buffer == IntPtr.Zero || bytes < 4) return "session-state-unavailable";
+                if (Marshal.ReadInt32(buffer) != 0) return "disconnected";
+            }
             finally { Native.WTSFreeMemory(buffer); }
         }
         else return "session-state-unavailable";
@@ -235,6 +321,9 @@ internal sealed class WindowsPlatformBackend : IPlatformBackend
         }
         finally { Native.CloseDesktop(desktop); }
     }
+
+    internal static int? ReadProcessSessionId() => CheckedSessionId(Native.ProcessIdToSessionId((uint)Environment.ProcessId, out var session), session);
+    internal static int? CheckedSessionId(bool succeeded, uint session) => succeeded && session <= int.MaxValue ? (int)session : null;
 
     private static string? DesktopName(IntPtr desktop)
     {
@@ -346,6 +435,7 @@ internal sealed class WindowsPlatformBackend : IPlatformBackend
         [DllImport("user32.dll")] internal static extern bool CloseDesktop(IntPtr desktop);
         [DllImport("user32.dll")] internal static extern IntPtr GetThreadDesktop(uint threadId);
         [DllImport("kernel32.dll")] internal static extern uint GetCurrentThreadId();
+        [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] internal static extern bool ProcessIdToSessionId(uint processId, out uint sessionId);
         [DllImport("user32.dll", EntryPoint = "GetUserObjectInformationW", CharSet = CharSet.Unicode)] internal static extern bool GetUserObjectInformation(IntPtr obj, int index, StringBuilder value, int length, out int needed);
         [DllImport("wtsapi32.dll", EntryPoint = "WTSQuerySessionInformationW", SetLastError = true)] internal static extern bool WTSQuerySessionInformation(IntPtr server, int session, int info, out IntPtr buffer, out int bytes);
         [DllImport("wtsapi32.dll")] internal static extern void WTSFreeMemory(IntPtr memory);

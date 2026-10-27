@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, dialog, session, clipboard, shell, screen, systemPreferences, desktopCapturer } = require('electron');
+const { app, BrowserWindow, ipcMain, MessageChannelMain, Menu, Tray, nativeImage, dialog, session, clipboard, shell, screen, systemPreferences, desktopCapturer } = require('electron');
 const { pathToFileURL } = require('node:url');
 const path = require('node:path');
 const fs = require('node:fs');
@@ -7,21 +7,38 @@ const crypto = require('node:crypto');
 const { spawn, execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const { OrbitController } = require('./controller.cjs');
+const { streamOpenError, frameRequestError, wakeDisplayError } = require('./stream-session.cjs');
+const { IDENTITY_TERMINAL, IDENTITY_CHANGED_MESSAGE } = require('./security-terminal.cjs');
+const { NativeWindowVisibility, OwnerFrameGate } = require('./viewer-visibility.cjs');
+const { NativeWindowFullscreen, fullscreenRequest } = require('./fullscreen-state.cjs');
 const { createMacPermissionSetup } = require('./mac-permissions.cjs');
 const { ChildProofAgent, findTailscaleCli } = require('./local-control.cjs');
+const { HostSupervisor, NetworkChangeTracker, tailscaleObservation, BoundedHostLog, IdentityRotationGuard } = require('./host-supervisor.cjs');
 
 let mainWindow, tray, hostProcess, controller, showMacPermissionSetup;
 const viewerWindows = new Map();
+const windowStates = new Map();
+const fullscreenStates = new Map();
+const windowInputs = new Map();
+const frameGate = new OwnerFrameGate();
+const windowReconnects = new Map();
 const viewerActions = new Set(['viewer.context', 'viewer.close', 'session.monitors', 'session.frame', 'session.input',
+  'session.reconnect', 'session.frame.presented', 'session.wake-display',
+  'session.stream.open', 'session.stream.close',
   'session.release-inputs', 'clipboard.read', 'clipboard.write', 'clipboard.local.write', 'files.list', 'files.upload',
   'files.download', 'session.lock', 'session.restart']);
 let quitting = false;
-let restartTimer, healthTimer, healthBusy = false, restartAttempts = 0;
+let restartTimer, healthTimer, healthBusy = false, lastProbeAt = 0, healthFailures = 0;
+let lastIdentity = null, lastUiStatus = null, hostDirectory;
+const identityRotation = new IdentityRotationGuard();
+const supervisor = new HostSupervisor();
+const networkChanges = new NetworkChangeTracker();
 const appRoot = path.resolve(__dirname, '..');
 const workspaceRoot = path.resolve(appRoot, '..', '..');
 const controlPort = Number(process.env.ORBIT_CONTROL_PORT || 47831);
 const allowLoopback = process.env.ORBIT_LOOPBACK_TEST === '1';
-const rendererUrl = process.env.ORBIT_RENDERER_URL;
+// An installed build never loads its privileged UI from a dev server named by the environment.
+const rendererUrl = app.isPackaged ? undefined : process.env.ORBIT_RENDERER_URL;
 const isDevUrl = value => {
   try { const u = new URL(value); return u.protocol === 'http:' && u.hostname === '127.0.0.1' && u.port === '5173'; }
   catch { return false; }
@@ -44,6 +61,7 @@ else {
 }
 
 function startHost(dataDirectory) {
+  supervisor.started(); healthFailures = 0; networkChanges.reset();
   controller.clearLocalControl();
   const controlToken = crypto.randomBytes(32).toString('base64url');
   const proofKey = crypto.randomBytes(32).toString('base64url');
@@ -62,33 +80,94 @@ function startHost(dataDirectory) {
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   hostProcess = child;
-  const log = fs.createWriteStream(path.join(dataDirectory, 'host.log'), { flags: 'a', mode: 0o600 });
-  child.stdout.pipe(log, { end: false }); child.stderr.pipe(log, { end: false });
+  child.orbitStartedAt = Date.now();
+  const log = new BoundedHostLog(path.join(dataDirectory, 'host.log'));
+  child.stdout.on('data', chunk => log.write(chunk)); child.stderr.on('data', chunk => log.write(chunk));
   child.stdin.on('error', () => {});
   if (child.pid) {
     controller.setLocalControl(new ChildProofAgent({ proofKey, pid: child.pid, port: controlPort }), controlToken);
     child.stdin.write(JSON.stringify({ version: 1, proofKey }) + '\n');
   }
-  child.once('error', error => log.write(error.message + '\n'));
-  child.once('exit', () => {
-    if (hostProcess === child) controller.clearLocalControl();
-    if (!quitting && mainWindow && !restartTimer) {
-      restartAttempts++;
-      restartTimer = setTimeout(() => {
+  let completed = false;
+  const stopped = () => {
+    if (completed) return; completed = true;
+    if (hostProcess !== child) return;
+    controller.clearLocalControl();
+    hostProcess = null;
+    updateTrayActivity({});
+    if (!quitting && !restartTimer) {
+      if (child.orbitManualRestart) { startHost(dataDirectory); return; }
+      const delay = supervisor.exited(Date.now(), child.orbitRestartReason || 'The background host stopped.');
+      notifyRuntimeChanged();
+      if (delay !== null) restartTimer = setTimeout(() => {
         restartTimer = null;
         if (!quitting) startHost(dataDirectory);
-      }, Math.min(30000, 1000 * 2 ** Math.min(restartAttempts - 1, 5)));
+      }, delay);
     }
-  });
+  };
+  child.once('error', () => { log.write('Background host process could not start.\n'); stopped(); });
+  child.once('exit', stopped);
   child.once('close', () => log.end());
+}
+
+function runtimeStatus() { return { supervisor: supervisor.snapshot(), identity: lastIdentity }; }
+function notifyRuntimeChanged() {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('orbit:incoming-changed');
+  if (tray && !tray.isDestroyed()) tray.setContextMenu(buildTrayMenu());
+}
+function notifyCleanupChanged(change) {
+  if (!Number.isSafeInteger(change?.revision) || change.revision < 0) return;
+  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+    try { mainWindow.webContents.send('orbit:cleanup-changed', { revision: change.revision }); }
+    catch { /* A closing owner window must not change remote cleanup outcome. */ }
+  }
+}
+function stopForRecovery(reason, manual = false) {
+  const child = hostProcess;
+  if (!child || child.exitCode !== null || child.orbitStopping) return;
+  child.orbitStopping = true; child.orbitRestartReason = reason; child.orbitManualRestart = manual;
+  supervisor.stopping(reason); notifyRuntimeChanged();
+  // EOF normally releases held input. The hard stop is only a bounded fallback
+  // for a hung child; every future launch receives fresh D6 credentials.
+  child.stdin.end();
+  const force = setTimeout(() => { if (hostProcess === child && child.exitCode === null) child.kill(); }, 3000);
+  force.unref(); child.once('exit', () => clearTimeout(force));
+}
+function retryHost() {
+  if (!supervisor.canRetry()) return runtimeStatus();
+  clearTimeout(restartTimer); restartTimer = null;
+  supervisor.retry(Date.now()); notifyRuntimeChanged();
+  if (hostProcess?.exitCode === null && !hostProcess.orbitStopping) stopForRecovery('Retry requested locally.', true);
+  else if (hostProcess?.exitCode === null) hostProcess.orbitManualRestart = true;
+  else startHost(hostDirectory);
+  return runtimeStatus();
 }
 
 async function start() {
   app.setAppUserModelId('dev.orbit.remote');
   const directory = process.env.ORBIT_APP_DATA || app.getPath('userData');
+  hostDirectory = directory;
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   controller = new OrbitController({
     directory, requireLocalProof: true, controlUrl: 'http://127.0.0.1:' + controlPort, allowLoopback,
+    onFramePresented: entry => {
+      const state = windowStates.get(entry.owner)?.current();
+      if (!state || state.paused) return;
+      const context = frameContext(entry.sessionId, entry.slotKey);
+      if (frameGate.presented(entry.owner, entry.ownerCapture, context))
+        controller.noteDisplayPresented(entry.sessionId, context.generation);
+    },
+    onSessionEnded: (sessionId, reason) => {
+      for (const entry of viewerWindows.values()) if (entry.sessionId === sessionId) entry.endedReason = reason;
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('orbit:incoming-changed');
+    },
+    onCleanupChanged: notifyCleanupChanged,
+    onDisplayAsleep: sessionId => {
+      for (const owner of windowStates.keys()) frameGate.invalidateSession(owner, sessionId);
+    },
+    onDisplayPendingInvalidated: sessionId => {
+      for (const owner of windowStates.keys()) frameGate.invalidatePendingSession(owner, sessionId);
+    },
     native: {
       getSettings: () => ({ startAtLoginSupported: app.isPackaged && !process.env.PORTABLE_EXECUTABLE_FILE && ['win32', 'darwin'].includes(process.platform),
         startAtLogin: app.isPackaged && !process.env.PORTABLE_EXECUTABLE_FILE && ['win32', 'darwin'].includes(process.platform) ?
@@ -111,56 +190,191 @@ async function start() {
     dialog, systemPreferences, desktopCapturer, shell, getHostStatus: () => controller.local('status'),
   });
   startHost(directory);
-  let ready = false;
   for (let attempt = 0; attempt < 80; attempt++) {
-    try { await controller.local('status'); ready = true; break; }
+    try { const status = await controller.local('status'); lastIdentity = status.identity || null; supervisor.healthy(Date.now(), status.remoteEnabled); break; }
     catch { await new Promise(resolve => setTimeout(resolve, 250)); }
-    if (hostProcess.exitCode !== null) break;
   }
-  if (!ready) throw new Error('The background host did not become ready. Check ' + path.join(directory, 'host.log'));
+  // Failed hosts still get an owner UI with a terminal Retry action instead of
+  // disappearing or recovering forever in the background.
   ipcMain.handle('orbit:invoke', async (event, action, payload) => {
     const source = event.senderFrame?.url;
     const viewer = viewerWindows.get(event.sender.id);
     const owner = event.sender === mainWindow?.webContents;
-    const trusted = source === pageUrl(!!viewer) && event.senderFrame === event.sender.mainFrame;
+    const trusted = !event.sender.isDestroyed() && source === pageUrl(!!viewer) && event.senderFrame === event.sender.mainFrame;
     if (!trusted || (!owner && !viewer)) throw new Error('Untrusted application frame.');
     if (typeof action !== 'string' || action.length > 60 || JSON.stringify(payload || {}).length > 1024 * 1024) throw new Error('Invalid application request.');
     if (payload == null) payload = {};
     if (typeof payload !== 'object' || Array.isArray(payload)) throw new Error('Invalid application request.');
+    if (action === 'window.state') return windowStates.get(event.sender.id).current();
+    if (action === 'window.fullscreen.get' || action === 'window.fullscreen.set')
+      return fullscreenRequest(event, action, payload, fullscreenStates, pageUrl(!!viewer));
     if (viewer) {
       if (!viewerActions.has(action)) throw new Error('This screen window cannot perform that action.');
       if (action === 'viewer.context') {
+        if (viewer.endedReason) return { session: { ...viewer.presentation, endedReason: viewer.endedReason, canReconnect: controller.canReconnect(viewer.sessionId) }, monitorId: viewer.monitorId };
         const s = controller.getSession(viewer);
         return { session: { sessionId: viewer.sessionId, device: { id: s.device.id, name: s.device.name,
           platform: s.device.platform, direction: 'outgoing' }, viewOnly: s.viewOnly, permissions: s.permissions,
-          canScaleFrames: s.canScaleFrames, canConditionalFrames: s.canConditionalFrames }, monitorId: viewer.monitorId };
+          canScaleFrames: s.canScaleFrames, canConditionalFrames: s.canConditionalFrames, canJpegFrames: s.canJpegFrames, canLocalCursor: s.canLocalCursor,
+          sessionGeneration: s.sessionGeneration ?? 0, availability: controller.availability(viewer.sessionId, s) }, monitorId: viewer.monitorId, independent: viewer.ownsSession === true };
       }
       if (action === 'viewer.close') { viewer.window.close(); return { ok: true }; }
       if (action !== 'clipboard.local.write' && payload.sessionId !== viewer.sessionId) throw new Error('This screen belongs to another session.');
-      if (['session.frame', 'session.input'].includes(action) && payload.monitorId !== viewer.monitorId)
+      if (action === 'session.reconnect') payload = { ...payload, monitorId: viewer.monitorId };
+      if (['session.frame', 'session.frame.presented', 'session.input', 'session.stream.open'].includes(action) && payload.monitorId !== viewer.monitorId)
         throw new Error('This screen belongs to another remote monitor.');
     } else {
       if (action === 'viewer.open') return openViewer(payload);
       if (action.startsWith('viewer.')) throw new Error('This action is only available inside a screen window.');
+      if (action === 'host.runtime') return runtimeStatus();
+      if (action === 'host.retry') return retryHost();
+      if (action === 'identity.rotate') {
+        return identityRotation.run(payload, {
+          getStatus: () => controller.local('status'),
+          confirm: async count => (await dialog.showMessageBox(mainWindow, { type: 'warning', title: 'Rotate Orbit identity?',
+            message: `${count} devices will lose access and must pair again.`,
+            detail: 'All incoming sessions will end and invitations will be invalidated. This computer must pair again with its saved remote computers. This cannot be undone.',
+            buttons: ['Cancel', 'Rotate identity'], defaultId: 0, cancelId: 0, noLink: true })).response === 1,
+          rotate: async () => {
+            await controller.shutdown();
+            const child = hostProcess;
+            if (child) { child.orbitManualRestart = true; child.orbitRestartReason = 'Identity rotated. Pair every device again.'; }
+            try { return await controller.local('identity/rotate', 'POST', { confirmRePair: true, expectedFingerprint: payload.expectedFingerprint }); }
+            catch (error) { if (child) child.orbitManualRestart = false; throw error; }
+          },
+        });
+      }
+    }
+    windowStates.get(event.sender.id)?.current();
+    const ownerCapture = frameGate.capture(event.sender.id), originFrame = event.senderFrame;
+    if (action === 'session.reconnect') {
+      if (!windowReconnects.has(event.sender.id)) windowReconnects.set(event.sender.id, new Set());
+      windowReconnects.get(event.sender.id).add(payload.sessionId);
     }
     try {
-      const result = await controller.invoke(action, payload);
-      if (action === 'status') observeIncoming(result);
+      if (action === 'session.frame.presented') {
+        const context = frameContext(payload.sessionId, payload.monitorId || '');
+        if (windowStates.get(event.sender.id)?.current().paused || !frameGate.acknowledge(event.sender.id, payload.deliveryId, context))
+          throw new Error('Wait for a fresh screen before controlling the desktop.');
+        controller.noteDisplayPresented(payload.sessionId, context.generation);
+        return { ok: true };
+      }
+      if (action === 'session.stream.open') {
+        if (windowStates.get(event.sender.id)?.current().paused) throw new Error('Screen updates are paused while this window is minimized or hidden.');
+        if (typeof payload.requestId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(payload.requestId))
+          throw new Error('Invalid stream request.');
+        const { port1, port2 } = new MessageChannelMain();
+        try {
+          const result = controller.videoStreams.open(payload, port1, event.sender.id);
+          controller.videoStreams.entries.get(result.streamId).ownerCapture = ownerCapture;
+          event.senderFrame.postMessage('orbit:video-port', { requestId: payload.requestId }, [port2]);
+          return result;
+        } catch (error) {
+          port1.close(); port2.close();
+          return streamOpenError(error, controller.endedSessions.get(payload.sessionId));
+        }
+      }
+      if (action === 'session.stream.close') {
+        controller.videoStreams.close(payload.streamId, event.sender.id); return { ok: true };
+      }
+      let result, frameSession, frameSleepReport;
+      if (action === 'session.input' && windowStates.get(event.sender.id)?.current().paused)
+        throw new Error('Screen input is paused while this window is minimized or hidden.');
+      if (action === 'session.input') {
+        controller.getSession(payload);
+        if (!frameGate.allows(event.sender.id, frameContext(payload.sessionId, payload.monitorId || '')))
+          throw new Error('Wait for a fresh screen before controlling the desktop.');
+        if (!windowInputs.has(event.sender.id)) windowInputs.set(event.sender.id, new Set());
+        const inputSessions = windowInputs.get(event.sender.id);
+        for (const sessionId of inputSessions) if (!controller.sessions.has(sessionId)) inputSessions.delete(sessionId);
+        inputSessions.add(payload.sessionId);
+      }
+      // Session-only sleep invalidation preserves ownerCapture. Its replacement
+      // means native pause/navigation/process loss, even after a window restores.
+      const assertWakeCurrent = () => {
+        const state = windowStates.get(event.sender.id)?.current();
+        if (!state || state.paused || event.sender.isDestroyed() || event.sender.mainFrame !== originFrame
+          || frameGate.capture(event.sender.id) !== ownerCapture
+          || (owner ? event.sender !== mainWindow?.webContents : viewerWindows.get(event.sender.id) !== viewer || viewer.sessionId !== payload.sessionId))
+          throw Object.assign(new Error('The screen changed before display wake completed.'), { code: 'wake_cancelled' });
+      };
+      try {
+        if (action === 'session.wake-display') {
+          if (Object.keys(payload).length !== 1 || typeof payload.sessionId !== 'string' || !payload.sessionId || payload.sessionId.length > 128)
+            throw new Error('Invalid display wake request.');
+          assertWakeCurrent();
+        }
+        if (action === 'session.frame') {
+          frameSession = controller.getSession(payload);
+          frameSleepReport = frameSession.displaySleepReport;
+        }
+        result = await controller.invoke(action, payload, action === 'session.wake-display' ? assertWakeCurrent : undefined);
+        if (action === 'session.wake-display') assertWakeCurrent();
+      }
+      catch (error) {
+        if (action === 'session.wake-display') return wakeDisplayError(error, controller.endedSessions.get(payload.sessionId));
+        if (['session.start', 'clipboard.read', 'clipboard.write', 'files.list', 'files.upload', 'files.download'].includes(action)
+          && error?.status === undefined && IDENTITY_TERMINAL.has(error?.code))
+          return { error: { code: error.code, message: IDENTITY_CHANGED_MESSAGE } };
+        if (action === 'session.frame') {
+          const result = frameRequestError(error, controller.endedSessions.get(payload.sessionId), controller.canReconnect(payload.sessionId));
+          return result;
+        }
+        if (action === 'session.reconnect') return { error: { ...frameRequestError(error).error, canReconnect: controller.canReconnect(payload.sessionId) } };
+        if (action !== 'status' || !lastUiStatus) throw error;
+        result = { ...lastUiStatus, host: { ...lastUiStatus.host, online: false }, sessions: lastUiStatus.sessions.filter(s => s.direction === 'outgoing') };
+      }
+      if (action === 'session.frame' && result?.data?.byteLength && !windowStates.get(event.sender.id)?.current().paused
+        && controller.sessions.get(payload.sessionId) === frameSession && frameSession.displaySleepReport === frameSleepReport) {
+        const deliveryId = frameGate.issueFrame(event.sender.id, ownerCapture, payload.sessionId, payload.monitorId || '', result);
+        if (deliveryId) result = { ...result, deliveryId };
+      }
+      if (action === 'session.reconnect' && (event.sender.isDestroyed() || event.sender.mainFrame !== originFrame || frameGate.capture(event.sender.id) !== ownerCapture)) {
+        await controller.invoke('session.end', { sessionId: result.session.sessionId }).catch(() => {});
+        throw new Error('This screen changed before reconnect completed.');
+      }
+      if (action === 'session.release-inputs') windowInputs.get(event.sender.id)?.delete(payload.sessionId);
+      if (action === 'session.reconnect' && viewer) {
+        if (viewer.window.isDestroyed() || !viewerWindows.has(event.sender.id)) {
+          await controller.invoke('session.end', { sessionId: result.session.sessionId }).catch(() => {});
+          throw new Error('This screen closed before reconnect completed.');
+        }
+        viewer.sessionId = result.session.sessionId; viewer.monitorId = result.monitorId; viewer.ownsSession = true; delete viewer.endedReason;
+        viewer.presentation = { sessionId: result.session.sessionId, device: { id: result.session.device.id, name: result.session.device.name, platform: result.session.device.platform, direction: 'outgoing' }, viewOnly: true,
+          permissions: { view: false, control: false, clipboard: false, files: false, power: false } };
+      }
+      if (action === 'status') {
+        lastIdentity = controller.lastStatus?.identity || lastIdentity;
+        result = { ...result, ...runtimeStatus() }; lastUiStatus = result; observeIncoming(result);
+      }
       else if (['host.disconnect-all', 'session.end', 'device.revoke'].includes(action)) {
         observeIncoming(await controller.local('status'));
+      }
+      else if (['device.block', 'device.allow'].includes(action)) {
+        // The mutation already succeeded; a later health probe must not turn
+        // its authoritative response into an apparent failure.
+        try { observeIncoming(await controller.local('status')); } catch { /* Next health poll refreshes the banner. */ }
       }
       return result;
     }
     finally {
-      // Owner disconnection also closes screens whose session was removed by forget.
-      for (const entry of viewerWindows.values()) if (!controller.sessions.has(entry.sessionId)) entry.window.close();
+      if (action === 'session.reconnect') windowReconnects.get(event.sender.id)?.delete(payload.sessionId);
+      for (const entry of viewerWindows.values()) {
+        // A terminal window retains an explanation, never a controller session.
+        // Deliberate owner dismissal/forget still closes its attached windows.
+        const dismissed = owner && ((action === 'session.end' && payload.sessionId === entry.sessionId) ||
+          (action === 'device.forget' && payload.deviceId === entry.presentation.device.id));
+        const reason = controller.endedSessions.get(entry.sessionId);
+        if (reason) entry.endedReason = reason;
+        if ((dismissed || (!controller.sessions.has(entry.sessionId) && !entry.endedReason)) && !entry.window.isDestroyed()) entry.window.close();
+      }
     }
   });
   session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
   session.defaultSession.setPermissionCheckHandler(() => false);
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
-    const csp = rendererUrl ? "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws://127.0.0.1:5173; object-src 'none'; frame-src 'none'" :
-      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'";
+    const csp = rendererUrl ? "default-src 'self'; script-src 'self' 'unsafe-inline'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws://127.0.0.1:5173; object-src 'none'; frame-src 'none'" :
+      "default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'";
     callback({ responseHeaders: { ...details.responseHeaders, 'Content-Security-Policy': [csp] } });
   });
   createWindow();
@@ -172,14 +386,26 @@ async function start() {
     healthBusy = true;
     try {
       const status = await controller.local('status');
+      if (hostProcess?.orbitStopping) return;
       observeIncoming(status);
-      restartAttempts = 0;
+      lastIdentity = status.identity || null; healthFailures = 0;
+      supervisor.healthy(Date.now(), status.remoteEnabled);
       const tailscaleCli = findTailscaleCli();
-      if (!allowLoopback && !status.remoteEnabled && tailscaleCli) {
-        const { stdout } = await promisify(execFile)(tailscaleCli, ['status', '--json'], { timeout: 5000, maxBuffer: 4 * 1024 * 1024, windowsHide: true });
-        if (JSON.parse(stdout).BackendState === 'Running') hostProcess.stdin.end();
+      if (!allowLoopback && !status.identity?.expired && tailscaleCli && Date.now() - lastProbeAt >= 10000) {
+        lastProbeAt = Date.now(); const observedChild = hostProcess;
+        let observed;
+        try {
+          const { stdout } = await promisify(execFile)(tailscaleCli, ['status', '--json'], { timeout: 5000, maxBuffer: 4 * 1024 * 1024, windowsHide: true });
+          observed = tailscaleObservation(JSON.parse(stdout));
+        } catch { /* Unknown must never restart or imply loss of the address. */ }
+        if (hostProcess === observedChild && !observedChild.orbitStopping && networkChanges.observe(status.remoteEnabled ? status.transport?.address ?? null : null, observed))
+          stopForRecovery('Tailscale address changed. Reconnecting.');
       }
-    } catch { /* the next health tick or child exit restarts recovery */ }
+    } catch {
+      supervisor.failedHealth();
+      if (hostProcess?.exitCode === null && !hostProcess.orbitStopping && Date.now() - hostProcess.orbitStartedAt >= 20000 && ++healthFailures >= 3)
+        stopForRecovery('The background host stopped responding.');
+    }
     finally { healthBusy = false; }
   }, 3000);
 }
@@ -201,7 +427,7 @@ function createWindow() {
     backgroundColor: '#101615', title: 'Orbit Remote', autoHideMenuBar: true,
     icon: app.isPackaged ? path.join(process.resourcesPath, 'icons', 'icon.png') : path.join(appRoot, 'build', 'icons', 'icon.png'),
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true,
-      sandbox: true, nodeIntegration: false, webSecurity: true, spellcheck: false },
+      sandbox: true, nodeIntegration: false, webSecurity: true, spellcheck: false, backgroundThrottling: false },
   });
   Menu.setApplicationMenu(process.platform === 'darwin' ? Menu.buildFromTemplate([
     { label: app.name, submenu: [
@@ -222,7 +448,39 @@ function pageUrl(viewer = false) {
   return url.href;
 }
 
+function frameContext(sessionId, monitorId) {
+  const session = controller.getSession({ sessionId });
+  return { sessionId, monitorId, generation: session.sessionGeneration ?? 0, frame: session.frameSlots?.get(monitorId)?.frame };
+}
+
 function hardenWindow(window) {
+  const owner = window.webContents.id;
+  // Visible but unfocused/occluded viewers keep decoding. Explicit native
+  // minimize/hide closes their delivery and releases input instead of silently
+  // allowing Chromium's background scheduler to strand Worker credit.
+  const pauseDelivery = state => {
+    frameGate.invalidate(owner);
+    for (const sessionId of windowReconnects.get(owner) || []) controller.cancelReconnect(sessionId);
+    const sessions = new Set(windowInputs.get(owner) || []);
+    for (const entry of controller?.videoStreams.entries.values() || []) if (entry.owner === owner) sessions.add(entry.sessionId);
+    const viewer = viewerWindows.get(owner); if (viewer) sessions.add(viewer.sessionId);
+    if (state?.paused === true) controller?.videoStreams.pauseOwner(owner, state);
+    else controller?.videoStreams.closeOwner(owner);
+    windowInputs.delete(owner);
+    for (const sessionId of sessions) if (controller.sessions.has(sessionId))
+      controller.invoke('session.release-inputs', { sessionId }).catch(() => {});
+  };
+  windowStates.set(owner, new NativeWindowVisibility(window, {
+    notify: state => { frameGate.invalidate(owner); window.webContents.send('orbit:window-state', state); }, onPause: pauseDelivery,
+  }));
+  fullscreenStates.set(owner, new NativeWindowFullscreen(window, state => {
+    if (!window.webContents.isDestroyed()) window.webContents.send('orbit:fullscreen-state', state);
+  }));
+  const closeFullscreen = () => { fullscreenStates.get(owner)?.close(); fullscreenStates.delete(owner); };
+  window.once('closed', () => { pauseDelivery(); windowStates.get(owner)?.close(); windowStates.delete(owner); closeFullscreen(); frameGate.forget(owner); windowReconnects.delete(owner); });
+  window.webContents.on('did-start-navigation', (_event, _url, inPlace, mainFrame) => { if (mainFrame && !inPlace) pauseDelivery(); });
+  window.webContents.on('render-process-gone', pauseDelivery);
+  window.webContents.on('destroyed', () => { pauseDelivery(); closeFullscreen(); frameGate.forget(owner); windowReconnects.delete(owner); });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', event => event.preventDefault());
   window.webContents.on('will-attach-webview', event => event.preventDefault());
@@ -233,7 +491,8 @@ function openViewer(payload) {
   const monitor = payload.monitorId ? s.monitors.find(m => m.id === payload.monitorId) :
     s.monitors.find(m => m.primary) || s.monitors[0];
   if (!monitor) throw new Error('Choose an available remote monitor.');
-  for (const entry of viewerWindows.values()) {
+  for (const [id, entry] of viewerWindows) {
+    if (entry.window.isDestroyed()) { viewerWindows.delete(id); continue; }
     if (entry.sessionId === payload.sessionId && entry.monitorId === monitor.id) {
       entry.window.show(); entry.window.focus(); return { ok: true };
     }
@@ -249,16 +508,19 @@ function openViewer(payload) {
     title: s.device.name + ' — ' + (monitor.name || 'Remote screen'),
     icon: app.isPackaged ? path.join(process.resourcesPath, 'icons', 'icon.png') : path.join(appRoot, 'build', 'icons', 'icon.png'),
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true,
-      sandbox: true, nodeIntegration: false, webSecurity: true, spellcheck: false },
+      sandbox: true, nodeIntegration: false, webSecurity: true, spellcheck: false, backgroundThrottling: false },
   });
   const id = window.webContents.id;
-  viewerWindows.set(id, { window, sessionId: payload.sessionId, monitorId: monitor.id });
+  viewerWindows.set(id, { window, sessionId: payload.sessionId, monitorId: monitor.id,
+    presentation: { sessionId: payload.sessionId, device: { id: s.device.id, name: s.device.name, platform: s.device.platform, direction: 'outgoing' },
+      viewOnly: true, permissions: { view: false, control: false, clipboard: false, files: false, power: false } } });
   hardenWindow(window);
   window.once('ready-to-show', () => window.show());
   window.on('closed', () => {
+    const closing = viewerWindows.get(id);
     viewerWindows.delete(id);
     // A screen closes independently; the owner and other screens keep their session.
-    if (controller.sessions.has(payload.sessionId)) controller.invoke('session.release-inputs', { sessionId: payload.sessionId }).catch(() => {});
+    if (closing && controller.sessions.has(closing.sessionId)) controller.invoke(closing.ownsSession ? 'session.end' : 'session.release-inputs', { sessionId: closing.sessionId }).catch(() => {});
   });
   if (rendererUrl) window.loadURL(pageUrl(true)); else window.loadFile(entryFile, { query: { viewer: '1' } });
   return { ok: true };
@@ -286,6 +548,7 @@ function buildTrayMenu() {
   return Menu.buildFromTemplate([
     ...(viewing > 0 ? [{ label: trayActivityText(trayActivity), enabled: false }, { type: 'separator' }] : []),
     { label: 'Open Orbit Remote', click: () => { mainWindow.show(); mainWindow.focus(); } },
+    ...(supervisor.snapshot().state === 'stopped' ? [{ label: 'Remote access stopped. Retry', click: retryHost }] : []),
     ...(process.platform === 'darwin' ? [{ label: 'Set Up Mac Permissions…', click: () => openMacPermissionSetup() }] : []),
     { label: viewing > 0 ? `Disconnect all incoming sessions (${viewing})` : 'Disconnect all incoming sessions', click: async () => {
       try { await controller.invoke('host.disconnect-all'); observeIncoming(await controller.local('status')); }
@@ -373,7 +636,7 @@ app.on('before-quit', event => {
   if (quitting) return;
   event.preventDefault(); quitting = true;
   clearInterval(healthTimer); clearTimeout(restartTimer);
-  for (const entry of viewerWindows.values()) entry.window.destroy();
+  for (const entry of viewerWindows.values()) if (!entry.window.isDestroyed()) entry.window.destroy();
   Promise.race([controller?.shutdown(), new Promise(resolve => setTimeout(resolve, 1500))])
     .finally(async () => {
       const child = hostProcess;

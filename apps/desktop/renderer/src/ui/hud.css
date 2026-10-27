@@ -11,6 +11,11 @@
 .hud-stage>*{margin:0}
 .hud-reconnecting .hud-stage{filter:grayscale(.85) brightness(.62) blur(1px)}
 .hud-ended .hud-stage{filter:grayscale(1) brightness(.45) blur(2px)}
+.hud-paused .hud-stage{filter:grayscale(.6) brightness(.6)}
+.hud-asleep .hud-stage{filter:grayscale(.6) brightness(.5)}
+.display-wake-actions{display:flex;flex-direction:column;align-items:center;gap:8px}
+.display-wake-feedback{min-height:1.5em;max-width:36em;color:var(--text-secondary);font-size:13px;line-height:1.5}
+.display-wake-feedback:empty{min-height:0}
 
 /* Overlay (reconnecting / ended): blocks input to the stale image, keeps it visible. */
 .hud-veil{position:absolute;inset:0;z-index:1;display:grid;place-items:center;padding:110px 24px 24px;
@@ -45,6 +50,7 @@
 .hud-status{display:flex;align-items:center;gap:6px;min-width:0;padding:2px 4px 6px 6px;font-size:12px;line-height:1.2;color:var(--text-secondary)}
 .hud-status-fill{flex:1;min-width:8px}
 .hud-title{font-size:13px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:260px;margin-left:2px}
+.hud-title{margin-block:0;line-height:1.4;user-select:none}
 .hud-state{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border-radius:99px;font-weight:600;white-space:nowrap;
   background:var(--hud-inset);border:1px solid var(--line);color:var(--text)}
 .hud-state.is-reconnecting{color:var(--warning-text);border-color:var(--warning-line);background:color-mix(in srgb,var(--warning-surface) 80%,transparent)}

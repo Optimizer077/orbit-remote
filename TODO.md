@@ -57,7 +57,7 @@ These remain product requirements, not implemented support. Keep an authorized l
 ## P2 — streaming and functional depth
 
 - [ ] Establish the native-device baseline in [PERFORMANCE.md](docs/PERFORMANCE.md): update intervals, capture/encode time, frame bytes, resource use, input latency, and direct/DERP path; no advertised FPS before measurement.
-- [ ] Replace PNG polling with negotiated low-latency video and hardware encode/decode.
+- [x] Replace PNG polling with negotiated low-latency video and hardware encode/decode (Windows hosts, preview.5; Mac and Linux hosts still send images).
 - [ ] Add congestion/backpressure handling, frame pacing, quality/resolution controls, text clarity, and measured diagnostics.
 - [ ] Add audio with separate grants and visible state.
 - [ ] Implement Wayland using supported portals, PipeWire/EIS, and real consent persistence.

@@ -7,5 +7,6 @@ export default defineConfig({
   timeout: 90_000,
   workers: 1,
   reporter: 'list',
-  use: { trace: 'retain-on-failure' },
+  // Native view-only checks can display a private desktop. Retain text diagnostics, not pixels.
+  use: { trace: 'off', screenshot: 'off', video: 'off' },
 });

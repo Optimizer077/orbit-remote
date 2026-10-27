@@ -83,7 +83,7 @@ internal sealed class MacPlatformBackend : IPlatformBackend
                 {
                     if (input.Key is null || !Keys.TryGetValue(input.Key, out var key)) throw new ArgumentException("Unsupported keyboard code.");
                     var down = PlatformLimits.Down(input);
-                    Post(Native.CGEventCreateKeyboardEvent(IntPtr.Zero, key, down));
+                    Post(Native.CGEventCreateKeyboardEvent(IntPtr.Zero, key, down), key, down);
                     if (down) _heldKeys.Add(key); else _heldKeys.Remove(key);
                     break;
                 }
@@ -105,12 +105,12 @@ internal sealed class MacPlatformBackend : IPlatformBackend
         {
             if (SessionState() == "interactive" && Native.AXIsProcessTrusted())
             {
-                foreach (var key in _heldKeys) Post(Native.CGEventCreateKeyboardEvent(IntPtr.Zero, key, false));
+                foreach (var key in _heldKeys) Post(Native.CGEventCreateKeyboardEvent(IntPtr.Zero, key, false), releasing: true);
                 var sample = Native.CGEventCreate(IntPtr.Zero);
                 var point = sample != IntPtr.Zero ? Native.CGEventGetLocation(sample) : new Native.Point();
                 if (sample != IntPtr.Zero) Native.CFRelease(sample);
                 foreach (var button in _heldButtons) Post(Native.CGEventCreateMouseEvent(IntPtr.Zero,
-                    button == "left" ? 2u : button == "right" ? 4u : 26u, point, button == "left" ? 0u : button == "right" ? 1u : 2u));
+                    button == "left" ? 2u : button == "right" ? 4u : 26u, point, button == "left" ? 0u : button == "right" ? 1u : 2u), releasing: true);
             }
             _heldKeys.Clear(); _heldButtons.Clear();
         }
@@ -156,10 +156,31 @@ internal sealed class MacPlatformBackend : IPlatformBackend
 
     public async ValueTask DisposeAsync() { await ReleaseInputsAsync(); _inputGate.Dispose(); }
 
-    private static void Post(IntPtr value)
+    internal static ulong InputEventFlags(ulong inherited, IReadOnlySet<ushort> heldKeys,
+        ushort? changingKey = null, bool down = false, bool releasing = false)
+    {
+        const ulong shift = 1UL << 17, control = 1UL << 18, alternate = 1UL << 19, command = 1UL << 20;
+        var flags = inherited & ~(shift | control | alternate | command);
+        if (releasing) return flags;
+        bool Held(ushort key) => changingKey == key ? down : heldKeys.Contains(key);
+        if (Held(56) || Held(60)) flags |= shift;
+        if (Held(59) || Held(62)) flags |= control;
+        if (Held(58) || Held(61)) flags |= alternate;
+        if (Held(55) || Held(54)) flags |= command;
+        return flags;
+    }
+
+    private void Post(IntPtr value, ushort? changingKey = null, bool down = false, bool releasing = false)
     {
         if (value == IntPtr.Zero) throw new PlatformUnavailableException("input-failed", "CoreGraphics could not create the input event.");
-        try { Native.CGEventPost(0, value); } finally { Native.CFRelease(value); }
+        try
+        {
+            // CGEventPost queues delivery. A following event must use our remote
+            // key state even if the OS has not yet consumed a modifier key-up.
+            Native.CGEventSetFlags(value, InputEventFlags(Native.CGEventGetFlags(value), _heldKeys, changingKey, down, releasing));
+            Native.CGEventPost(0, value);
+        }
+        finally { Native.CFRelease(value); }
     }
 
     private static void RequireInteractive()
@@ -264,6 +285,8 @@ internal sealed class MacPlatformBackend : IPlatformBackend
         [DllImport(CoreGraphics)] internal static extern IntPtr CGEventCreate(IntPtr source);
         [DllImport(CoreGraphics)] internal static extern Point CGEventGetLocation(IntPtr value);
         [DllImport(CoreGraphics)] internal static extern void CGEventPost(uint tap, IntPtr value);
+        [DllImport(CoreGraphics)] internal static extern ulong CGEventGetFlags(IntPtr value);
+        [DllImport(CoreGraphics)] internal static extern void CGEventSetFlags(IntPtr value, ulong flags);
         [DllImport(CoreFoundation)] internal static extern void CFRelease(IntPtr value);
         [DllImport(CoreFoundation)] internal static extern IntPtr CFStringCreateWithCString(IntPtr allocator, [MarshalAs(UnmanagedType.LPUTF8Str)] string value, uint encoding);
         [DllImport(CoreFoundation)] internal static extern IntPtr CFDictionaryGetValue(IntPtr dictionary, IntPtr key);

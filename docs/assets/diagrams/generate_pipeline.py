@@ -1,9 +1,9 @@
-"""Draw the hardware streaming pipeline figure (decision D11) in Orbit's palette.
+"""Draw the hardware streaming pipeline figure in Orbit's palette.
 
 Run from the repository root: python docs/assets/diagrams/generate_pipeline.py
 Writes pipeline{,-narrow}{,-light}.svg with the helpers of generate_figures.py.
-The numbers are per-stage measurements from 2026-10-26 (docs/PERFORMANCE.md);
-change both together.
+The numbers are the measurements recorded in docs/PERFORMANCE.md (per-stage timings
+from 2026-10-26, live and synthetic stream runs); change both together.
 """
 
 from generate_figures import (OUT, THEMES, Type, arrow, badge, caps, chip, document, est, fit, heading, icon, para,
@@ -16,23 +16,25 @@ SUBTITLE = ["Measured per stage at 3024×1898 on one Windows PC (RTX 5060 Ti);",
 # (title, how, value, note, accent, status, glyph)
 STAGES = [
     ("Capture", "DXGI Desktop Duplication on the GPU; an unchanged screen costs nothing", "4.4 ms",
-     "per changed frame", "mint", "In the app · beta", "monitor"),
+     "per changed frame", "mint", "On by default", "monitor"),
     ("Encode", "Hardware H.264 through Windows Media Foundation", "5.8–7.6 ms",
-     "1080p: 2.5–2.9 ms", "mint", "In the app · beta", "chip"),
+     "1080p: 2.5–2.9 ms", "mint", "On by default", "chip"),
     ("Send", "One stream inside the pinned mutual-TLS link, inside WireGuard", "2–26 KB",
-     "per update, not ~1 MB", "blue", "In the app · beta", "lock"),
+     "per update, not ~1 MB", "blue", "On by default", "lock"),
     ("Decode", "WebCodecs hardware decoder; VideoToolbox on a Mac", "0.5–0.7 ms",
-     "Mac: 2.4–3.3 ms", "gold", "In the app · beta", "chip"),
+     "Mac: 2.4–3.3 ms", "gold", "On by default", "chip"),
     ("Draw", "Canvas; each decoded frame is released right after drawing", "0.2 ms",
-     "per frame", "gold", "In the app", "window"),
+     "per frame", "gold", "On by default", "window"),
 ]
 # (label, value used for the bar width, accent); encode uses the middle of its measured range.
 BUDGET = [("Capture 4.4 ms", 4.4, "mint"), ("Encode 5.8–7.6 ms", 6.7, "mint"), ("Decode 0.5–0.7 ms", 0.6, "gold"),
           ("Draw 0.2 ms", 0.2, "gold")]
 TOTAL = "≈ 11–13 ms per frame, plus the network"
-TODAY_LEAD = "Live, end to end:"
-TODAY = "59.3 frames/s at native 2560×1440 with 0.6 ms decode and ~300 KB/s, against about 20 frames/s at 12.5 MB/s for preview.4's picture path (loopback, one PC)."
-FOOT = "Stage timings are separate measurements; the live run is a loopback test on one PC. Cross-device results follow."
+TODAY_LEAD = "Measured live:"
+TODAY = ("59.3 frames/s at native 2560×1440 on a real desktop with 0.6 ms decode and about 300 KB/s, against about "
+         "20 frames/s at 12.5 MB/s for images. A 60-second synthetic test drew 3601 of 3601 frames at 60.0 fps.")
+FOOT = ("Stage timings are separate measurements and their sum is not a latency. Both stream runs used one PC. "
+        "Click-to-screen latency and video between two computers are not measured yet.")
 
 
 def card(x, y, w, n, stage, p, ty, height=None):
@@ -140,14 +142,15 @@ def pipeline_narrow(p, ty):
     return width, y + th + 32, out
 
 
-DESC = ("The hardware streaming pipeline in development, with per-stage measurements at 3024×1898: capture with DXGI "
+DESC = ("The hardware streaming pipeline, on by default for Windows hosts, with per-stage measurements at 3024×1898: capture with DXGI "
         "Desktop Duplication on the GPU, 4.4 ms per changed frame and nothing for an unchanged screen; hardware H.264 "
         "encoding through Windows Media Foundation, 5.8 to 7.6 ms, or 2.5 to 2.9 ms at 1080p; sending one stream inside "
         "the pinned mutual-TLS link within WireGuard, 2 to 26 KB per update instead of about 1 MB; WebCodecs hardware "
         "decoding, 0.5 to 0.7 ms on Windows and 2.4 to 3.3 ms on an Apple-silicon Mac; and drawing to a canvas in 0.2 ms. "
-        "The per-frame budget is about 11 to 13 ms plus the network. Measured live end to end on one PC: 59.3 frames per second "
-        "at native 2560 by 1440 with 0.6 ms decode and about 300 KB/s, against about 20 frames per second at 12.5 MB/s for the "
-        "preview.4 picture path. Cross-device results follow.")
+        "The stage times add up to about 11 to 13 ms per frame plus the network; this sum is not a latency measurement. "
+        "Measured live on one PC: 59.3 frames per second at native 2560 by 1440 on a real desktop with 0.6 ms decode and about "
+        "300 KB/s, against about 20 frames per second at 12.5 MB/s for images; a 60-second synthetic test drew 3601 of 3601 "
+        "frames at 60.0 frames per second. Click-to-screen latency and video between two computers are not measured yet.")
 
 
 def main():

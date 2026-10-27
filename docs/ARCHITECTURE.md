@@ -75,6 +75,18 @@ Pairing is directional. A Mac controlling a Windows PC needs an authorization on
 
 Session renewal reuses the paired identity and rechecks current permissions. It cannot restore a revoked authorization. There is one controlling session per host; view-only sessions can coexist. Mouse/keyboard input also requires the viewer's explicit **Take control** action, and held input is released on focus loss, Escape, disconnect, or lease expiry.
 
+## Screen streaming
+
+A session shows the remote screen as hardware video when the host supports it, and as single images otherwise. Both paths use the same session, grants, and pinned mutual-TLS connection pool.
+
+1. **Capture (host).** On Windows, one shared producer per monitor duplicates the screen on that monitor's GPU (DXGI Desktop Duplication). It serves both the video stream and image requests.
+2. **Encode (host).** The GPU's H.264 encoder, through Windows Media Foundation, runs in low-latency mode with no B-frames. A keyframe is sent when a viewer joins or asks for one.
+3. **Stream records (network).** The viewer's main process opens one long `GET /api/sessions/{id}/stream` response. Its body is a sequence of records with a fixed 24-byte header: configuration, video, heartbeat, cursor, and a terminal record that states why the stream ended. Acknowledgements, keyframe requests, and quality changes go back in small separate `POST` requests. The host limits unacknowledged frames and skips capture while the link is behind, instead of queueing old frames. It rechecks the session, revocation, and the viewing grant at least once per second and ends the stream within 1 s of losing authority.
+4. **Decode (viewer).** The main process validates every record header and passes video to a decoder worker in the screen window, which decodes it with WebCodecs in hardware. If the decoder falls behind, it is reset and a keyframe is requested.
+5. **Present (viewer).** Each frame is drawn to a canvas and released. The viewer draws the pointer itself from cursor records that the host sends separately from the video.
+
+**Image fallback.** When the host does not offer video (Mac and Linux hosts today), answers that it cannot stream, or the stream fails, the viewer requests single images and retries video automatically. Windows hosts send PNG or JPEG, whichever is smaller; Mac and Linux hosts send PNG. A display that is asleep produces a typed `display_asleep` result instead of a frozen picture. See the [protocol](PROTOCOL.md) for the exact records and limits and [PERFORMANCE.md](PERFORMANCE.md) for measurements.
+
 ## Multiple windows and existing remote monitors
 
 An active connection can open an existing host display in a separate local window. The main window and screen windows refer to the **same authenticated remote session**. Per-frame monitor selection changes which existing display is captured; it does not allocate a second controller or replace the session to switch monitors.
@@ -92,8 +104,8 @@ Each window keeps its monitor context so input uses the dimensions and physical 
 
 | Platform | Current adapter | Boundary |
 |---|---|---|
-| Windows | GDI capture, SendInput, Win32 clipboard, monitor enumeration. | Existing unlocked interactive desktop; secure desktop, sign-in, and Session 0 are unsupported. |
-| macOS | CoreGraphics monitor/input APIs, screenshot helper, clipboard helpers, permission preflight. | Requires local Screen Recording and Accessibility approval; runtime unvalidated. |
-| Linux | X11 capture/input/clipboard helpers and dependency checks. | Existing accessible X11 session; runtime unvalidated. Wayland fails closed. |
+| Windows | GPU capture (DXGI Desktop Duplication, GDI fallback for images), hardware H.264 through Media Foundation, SendInput, Win32 clipboard, monitor enumeration. | Existing unlocked interactive desktop; secure desktop, sign-in, and Session 0 are unsupported. |
+| macOS | CoreGraphics monitor/input APIs, screenshot helper (images only, no video), clipboard helpers, permission preflight. | Requires local Screen Recording and Accessibility approval; exercised on Apple silicon ([Mac record](MACOS-VALIDATION.md)), Intel untested. |
+| Linux | X11 capture (images only, no video), input and clipboard helpers, and dependency checks. | Existing accessible X11 session; runtime unvalidated. Wayland fails closed. |
 
-The [release plan](PLAN.md) separates native validation, unattended lifecycle, video transport, and secure distribution. [PERFORMANCE.md](PERFORMANCE.md) explains the current PNG pipeline and how to measure improvements. [TODO.md](../TODO.md) is the actionable handoff checklist, starting with Mac-to-Windows and Windows-to-Mac testing.
+The [release plan](PLAN.md) separates native validation, unattended lifecycle, video transport, and secure distribution. [PERFORMANCE.md](PERFORMANCE.md) records the streaming measurements and what is not measured yet. [TODO.md](../TODO.md) is the actionable handoff checklist, starting with Mac-to-Windows and Windows-to-Mac testing.

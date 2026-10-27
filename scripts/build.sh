@@ -73,6 +73,10 @@ dotnet publish src/Orbit.Host/Orbit.Host.csproj --configuration Release --runtim
 node -e 'const fs = require("node:fs"); const [manifest, output, runtime] = process.argv.slice(1); const { version } = JSON.parse(fs.readFileSync(manifest, "utf8")); fs.writeFileSync(output, JSON.stringify({ runtime, version, configuration: "Release", selfContained: true }, null, 2) + "\n");' "$repo_root/apps/desktop/package.json" "$host_output/build-info.json" "$runtime"
 
 export ORBIT_HOST_RUNTIME="$runtime"
+if [[ "${ORBIT_UNFUSED_TEST_BUILD:-}" == 1 ]]; then
+  echo 'ORBIT_UNFUSED_TEST_BUILD=1 builds a test-only app without security fuses; unset it for a release build.' >&2
+  exit 1
+fi
 cd -- "$repo_root/apps/desktop"
 if ! "$skip_install"; then
   npm ci --no-audit --no-fund

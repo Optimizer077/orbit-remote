@@ -1,53 +1,94 @@
-# Orbit Remote performance and streaming plan
+# Orbit Remote performance
 
-The preview uses full PNG screenshots requested over HTTPS. It supports functional desktop viewing and input, but has no verified frame-rate, end-to-end latency, bandwidth, or long-duration resource benchmark. A [loopback frame-cost baseline](#loopback-frame-cost-baseline) records frame sizes and host request times on one Windows machine. Windows capture has been exercised locally. macOS and Linux performance remains unvalidated.
+Since preview.5, Windows hosts send the screen as hardware H.264 video by default. Mac and Linux hosts, and any session where video can't run, send images instead. This page records what has been measured, how it was measured, and what has not been measured yet.
 
-Use this document to understand current costs and collect evidence before choosing optimizations. The [architecture](ARCHITECTURE.md) describes process and trust boundaries; [VALIDATION.md](VALIDATION.md) records completed checks.
+Every stream result here comes from one Windows PC. Click-to-screen latency and video between two computers have not been measured. The [architecture](ARCHITECTURE.md) describes process and trust boundaries, the [protocol](PROTOCOL.md) defines the stream records, and [VALIDATION.md](VALIDATION.md) records completed checks. [RESULTS.md](RESULTS.md) is the full record of experiments, including failed and incomplete runs, rejected approaches, and the decision log.
 
-## Current frame pipeline
+## Streaming pipeline
 
-Preview.4 frame path (one request per update):
+<p align="center">
+  <picture>
+    <source media="(max-width: 767px) and (prefers-color-scheme: dark)" srcset="assets/diagrams/pipeline-narrow.svg">
+    <source media="(max-width: 767px)" srcset="assets/diagrams/pipeline-narrow-light.svg">
+    <source media="(prefers-color-scheme: dark)" srcset="assets/diagrams/pipeline.svg">
+    <img src="assets/diagrams/pipeline-light.svg" width="1000" alt="The hardware streaming pipeline, measured per stage at 3024 by 1898: GPU capture 4.4 ms per changed frame, hardware H.264 encode 5.8 to 7.6 ms (2.5 to 2.9 ms at 1080p), one stream of 2 to 26 KB per update inside the pinned mutual-TLS link, hardware decode 0.5 to 0.7 ms (2.4 to 3.3 ms on a Mac), and drawing in 0.2 ms. Measured live on one PC: 59.3 frames per second at native 2560 by 1440 with about 300 KB/s. Click-to-screen latency is not measured yet.">
+  </picture>
+</p>
 
-1. The viewer window asks the main process for a frame of an existing monitor.
-2. The main process sends a pinned mutual-TLS HTTPS request to the remote host.
-3. The host checks authorization and waits for its capture gate.
-4. The native adapter captures the selected display and encodes PNG (dimensions and physical origin included).
-5. The host rechecks the session and authorization, then returns the frame with its capture timestamp.
-6. The main process passes the image and geometry to the window through IPC; the window draws it.
-7. The window schedules the next request (about 260 ms later in preview.4).
+1. **Capture.** The host duplicates the chosen monitor on that monitor's GPU (DXGI Desktop Duplication). An unchanged screen produces no new frame.
+2. **Encode.** The GPU's H.264 encoder, reached through Windows Media Foundation, runs in low-latency mode with no B-frames. Keyframes are sent when a viewer joins or asks for one.
+3. **Send.** One long-lived request on the pinned mutual-TLS listener carries a sequence of stream records: configuration, video, cursor, and a final record that says why the stream ended. The host keeps at most 8 unacknowledged frames, and at most about 100 ms of the target bitrate, in flight. When the link can't keep up, it skips capture and encoding instead of queueing old frames, so the frame rate drops and latency stays bounded.
+4. **Decode.** The viewer decodes with WebCodecs. Chromium backs it with D3D11VA on Windows, VideoToolbox on macOS, and VA-API on Linux. If 12 frames are already waiting to be decoded, or the oldest has waited more than 500 ms, the viewer resets the decoder, keeps the last picture on screen, and asks for a keyframe.
+5. **Present.** Each decoded frame is drawn to a canvas and released right away. The viewer draws the pointer itself from cursor shapes the host sends separately.
 
-The next release replaces this with the hardware video stream described below.
+**Fallback.** If the host can't stream video, or the stream fails, the viewer asks for single images and retries video automatically. Images travel over reused pinned connections as binary frames. Windows hosts send PNG or JPEG, whichever is smaller, and can also send smaller images and skip unchanged ones ([image fallback](#image-fallback)).
 
-The renderer schedules the next poll with `setTimeout(..., 260)` after the frame request finishes. **260 ms is the configured waiting period, not measured latency or a delivered frame interval.** Request setup, network round trips, host queueing, capture, PNG encoding, response transfer, and local processing add to the time between requests. Browser scheduling and image decoding can add further visible delay.
+## Measured results
 
-A useful model for one window is:
+Environment: Windows 11 Pro x64, Intel Core Ultra 7 265F, NVIDIA RTX 5060 Ti. Samples are small and, outside the synthetic runs, screen content was not controlled. Treat the numbers as direction, not guarantees.
 
-```text
-next request begins after approximately:
-260 ms + previous request setup + network + host queue/capture/encode
-       + response transfer + IPC processing
+### Per stage
 
-visible update also depends on image decode and presentation scheduling
-```
+Medians from separate measurements of each stage, on synthetic content unless noted.
 
-No term here is a measured benchmark. The timeout is a scheduling request rather than a deadline or guarantee. Reducing it alone cannot remove capture, transfer, or decode cost.
-
-## Costs visible in the implementation
-
-| Stage | Current behavior | Implication to measure |
+| Stage | Result | Conditions |
 |---|---|---|
-| Capture | Full selected-display screenshots, serialized by the host capture gate. | Larger/Retina displays and more viewer windows can increase work and queueing. |
-| Compression | PNG encoding; no negotiated video codec, dirty rectangles, or hardware video encoder. | Compression cost and frame size vary with screen content. Scrolling/video can be expensive. |
-| Requests | The TLS transport creates a pinned agent per request and destroys it afterward; keepalive is disabled. | Repeated TCP/TLS setup adds work and network trips. A shared authenticated session does not mean one persistent socket. |
-| Delivery | PNG bytes become a base64 data URL sent through Electron IPC. | Encoding, extra allocations, IPC, image decode, and garbage collection need profiling. |
-| Multiple displays | Viewer windows share one session. Simultaneous requests for the same monitor share an in-flight request; different monitors have independent frame slots. Host capture remains serialized. | More monitors add capture/encode/transfer work. There is no global adaptive capture/bandwidth scheduler. |
-| Input | Input has a separate host gate, bounded viewer queues, and coalesced pointer moves. | Capture is not intentionally ahead of input in the same queue, but CPU/network saturation can still affect responsiveness. |
+| GPU capture | 4.4 ms per changed frame; checking an unchanged screen costs about 0 ms | 3024×1898. For comparison: 62 ms for a GDI BitBlt, and 155 ms for preview.4's whole capture path with cursor and PNG |
+| Hardware encode | 2.5–2.9 ms per 1080p frame; 5.8–7.6 ms at 3024×1898; updates of 2–26 KB | NVIDIA encoder, Release build; no frames of encoder delay |
+| Viewer decode | 0.5–0.7 ms on Windows; 2.4–3.3 ms on an Apple-silicon Mac | 1080p and 3024×1898; 60 and 120 fps with no dropped frames |
+| Draw | 0.2 ms | Canvas |
 
-The native sources are [WindowsPlatformBackend.cs](../src/Orbit.Host/Platform/WindowsPlatformBackend.cs), [MacPlatformBackend.cs](../src/Orbit.Host/Platform/MacPlatformBackend.cs), and [LinuxPlatformBackend.cs](../src/Orbit.Host/Platform/LinuxPlatformBackend.cs). Polling lives in [App.tsx](../apps/desktop/renderer/src/App.tsx); transport setup is in [transport.cjs](../apps/desktop/electron/transport.cjs). These are implementation facts, not evidence of native performance parity.
+The stage times add up to about 11–13 ms per frame at 3024×1898, plus network, IPC, and queueing. This is a sum of separate measurements, not an end-to-end result.
 
-## Loopback frame-cost baseline
+### Whole stream
 
-The frame route accepts an optional `scale` (0.33 to 1, box-averaged, still PNG) and one `If-None-Match` validator. If the visible pixels have not changed, it answers `304 Not Modified` with no body. The block below is generated by [scripts/perf/measure-frames.mjs](../scripts/perf/measure-frames.mjs) against the real host in `--loopback-test` mode. It records frame size and host-side request cost on one machine. It is not a network, latency, or frame-rate benchmark. Regenerate it with `node scripts/perf/measure-frames.mjs --write`; edits inside the markers are overwritten.
+| Run | Result | Method |
+|---|---|---|
+| **Live desktop** | **59.3 fps at native 2560×1440** (1,780 frames in 30 s); decode 0.6 ms median, 1.5 ms p95; about 300 KB/s | The real app on a real desktop, host and viewer on the same PC over pinned mutual TLS on loopback. The image path on the same screen: about 20.8 fps at 12.5 MB/s |
+| Synthetic, one viewer | 3601 of 3601 frames drawn in 60 s, 60.0 fps; frame interval p95 17.7 ms | A generated 60 fps test source through the full pipeline on one PC |
+| Synthetic, two viewers | Both viewers held 60 fps | The same test with two viewers at once |
+
+### Recovery
+
+| Event | Time | Notes |
+|---|---|---|
+| Host restart | About 0.45 s | From the restarted host reporting healthy to video on screen; 1.9 s from stopping the host |
+| One-click **Reconnect** | About 0.42 s | — |
+| Quality change | About 0.13–0.15 s | Without restarting the stream |
+| Capture reset | About 0.15 s | Gap in drawn frames |
+
+### Method notes
+
+- **Synthetic source versus live desktop.** The synthetic source produces a known animation at 60 fps, so every frame can be counted: 3601 of 3601 means none was lost. It is simple content that compresses well, so it says little about bitrate on busy screens. The live run used whatever was on the desktop; content was not controlled, and a different screen would give different sizes.
+- **One PC.** Host and viewer ran on the same computer. The runs exclude real network latency, bandwidth limits, packet loss, and Tailscale relays.
+- **Stage timings** come from separate measurements of each stage. They show where time goes; they are not a latency measurement.
+
+### Not measured yet
+
+- **Click-to-screen latency.** This needs an instrumented loop or a high-speed recording with a documented method.
+- **Video between two computers.** Windows-generated video has reached a Mac viewer ([Mac handoff](MACOS.md)), but sustained cross-device playback, direct versus relayed paths, and lossy links have not been measured.
+- **AMD and Intel encoders.** Only an NVIDIA hardware encoder has been measured.
+- **Mac and Linux hosts.** They have no video stream and send images. Hardware decode on a Linux viewer is untested.
+- **Busy screens.** Very busy or noisy content can exceed the bitrate target.
+- **Long runs, several monitors, and resource use** (CPU, GPU, memory) over time.
+
+Targets, set against published figures from leading tools: 1080p60 on a LAN; ≤ 10–16 ms added LAN latency (Parsec reports 7 ms); at 1 % loss no freeze longer than 100 ms; text as sharp as 4:4:4. These are targets, not results.
+
+## Image fallback
+
+Mac and Linux hosts, and Windows sessions where video can't run, send one image per update. In preview.5 this path reuses pinned mutual-TLS connections and sends binary frames to a canvas without a fixed pause. Windows hosts also pick the smaller of PNG or JPEG for each frame, accept a smaller `scale` (0.33 to 1), and answer an unchanged screen with `304 Not Modified` and no image. Mac and Linux hosts send full-scale PNG.
+
+| Change | What it fixes | Measured effect |
+|---|---|---|
+| Connection reuse | A pinned mutual-TLS handshake for every frame | ~1.2 s of handshake round trips per frame removed at 150 ms RTT (estimated from a throttled run; the certificate pin is still checked on every new connection) |
+| Binary frames on a canvas, no fixed 260 ms pause | Stop-and-wait polling, base64 over IPC | Viewer updates 2.0 → 3.75 per second on loopback (~1.85×) |
+| Smaller of PNG or JPEG per frame | ~1 MB PNG per frame | Full-scale 1044 → 497 KiB. Through a 2 Mbit/s, +150 ms, 1 % loss proxy: 5.2 → 2.5 s per full frame, 1.2 s at half scale. Text-heavy frames still choose lossless PNG |
+
+**Cross-device image baseline (preview.4, Tailscale relayed, view-only, 30 frames):** Mac viewing Windows, median 1.86 s / p95 2.69 s per frame (~940 KB PNG, TLS 1.3); Windows viewing Mac, 1.77 s / 6.16 s (~1.36 MB Retina PNG, TLS 1.2). This predates every change on this page. See [VALIDATION.md](VALIDATION.md).
+
+### Loopback frame-cost baseline
+
+The block below is generated by [scripts/perf/measure-frames.mjs](../scripts/perf/measure-frames.mjs) against the real host in `--loopback-test` mode. It records image size and host-side request cost on one machine. It was recorded on 2026-10-26, before the image-path changes above. It is not a network, latency, or frame-rate benchmark. Regenerate it with `node scripts/perf/measure-frames.mjs --write`; edits inside the markers are overwritten.
 
 <!-- perf:start -->
 Measured 2026-10-26 with `node scripts/perf/measure-frames.mjs` (see [scripts/perf/README.md](../scripts/perf/README.md)).
@@ -74,28 +115,6 @@ Caveats:
 - One machine, one run. No Mac, Linux, multi-monitor or real-network result follows from these numbers.
 <!-- perf:end -->
 
-## Frame-path work since the baseline (2026-10-26)
-
-Frame rate is the top priority. Each row was measured on one Windows 11 PC (Intel Core Ultra 7 265F, RTX 5060 Ti, 3024×1898 display) unless it says otherwise. Samples are small and screen content was not controlled; treat these as direction, not guarantees. "Next release" changes are verified in development and are not in preview.4; "in development" parts are measured on their own and not yet connected to the app.
-
-**Real cross-device baseline (preview.4, Tailscale relayed, view-only, 30 frames):** Mac viewing Windows, median 1.86 s / p95 2.69 s per frame (~940 KB PNG, TLS 1.3); Windows viewing Mac, 1.77 s / 6.16 s (~1.36 MB Retina PNG, TLS 1.2). This predates every change below. See [VALIDATION.md](VALIDATION.md).
-
-| Change | Status | What it fixes | Measured effect |
-|---|---|---|---|
-| Connection reuse | Next release | A pinned mutual-TLS handshake for every frame | ~1.2 s of handshake round trips per frame removed at 150 ms RTT (estimated from a throttled run; the certificate pin is still checked on every new connection) |
-| Binary frames on a canvas, no fixed 260 ms pause | Next release | Stop-and-wait polling, base64 over IPC | Viewer updates 2.0 → 3.75 per second on loopback (~1.85×); request time unchanged (~220 ms), so the host became the bottleneck |
-| Smaller of PNG or JPEG per frame | Next release | ~1 MB PNG per frame | Full-scale 1044 → 497 KiB. Through a 2 Mbit/s, +150 ms, 1 % loss proxy: 5.2 → 2.5 s per full frame, 1.2 s at half scale. Text-heavy frames still choose lossless PNG |
-| DXGI GPU capture | Next release (beta) | GDI BitBlt of the whole desktop | Changed frame 4.4 ms vs 62 ms BitBlt (155 ms for today's full capture path with cursor and PNG); "unchanged" check ~0 ms |
-| Hardware H.264 encode (Media Foundation) | Next release (beta) | A full image per update | NVIDIA encoder, Release build: 1080p 2.5–2.9 ms median per frame, 3024×1898 5.8–7.6 ms; updates of 2–26 KB (vs ~1 MB PNG); no frames of encoder delay (synthetic content) |
-| WebCodecs hardware decode in the viewer | Next release (beta) | — | 0.5–0.7 ms median on Windows at 1080p and 3024×1898; 2.4–3.3 ms on an Apple-silicon Mac; 60 and 120 fps with no dropped frames; canvas draw 0.2 ms (synthetic content) |
-| Per-frame session check | Next release | Each capture re-read this process's Windows session id through a new Process object (~9.6 ms, twice per check, several checks per frame) | Live capture 133 → 2.3 ms median; every lock-screen and desktop check still runs on each frame |
-| Stream pacing and 2:1 downscale | Next release | Frames scheduled after encode start; 15.6 ms timer rounding; slow scaler | Offline stream loop 36–52 → 60 fps, real NVIDIA encoder included |
-| **Live video stream, end to end** | Next release (beta) | — | **59.3 frames/s at native 2560×1440** (1,780 frames in 30 s; sequential run, real app over pinned loopback mTLS), decode 0.6 ms median / 1.5 ms p95, about 300 KB/s. The picture path on the same screen: about 20.8 frames/s at 12.5 MB/s |
-
-**Per-frame budget for the stream at 3024×1898:** capture 4.4 + encode 5.8–7.6 + decode 0.5–0.7 + draw 0.2 ≈ **11–13 ms plus network, IPC and queueing** (lower at 1080p). This is a sum of separate measurements, not an end-to-end result; an end-to-end measurement must confirm it before any latency claim. Targets, set against published figures from leading tools: 1080p60 on a LAN; ≤ 10–16 ms added LAN latency (Parsec reports 7 ms); at 1 % loss no freeze longer than 100 ms; text as sharp as 4:4:4.
-
-The frame benchmark (`scripts/perf/measure-frames.mjs`, with `--format` and `--throttle`) and the WebCodecs decode benchmark ship with the next release.
-
 ## Tailscale path matters
 
 A direct Tailscale path generally offers lower latency and more throughput than DERP relay traffic. Peer relay is another possible path. A connection may change paths, so record the actual path during each run rather than assuming that a successful pairing means a direct connection. [Tailscale connection types](https://tailscale.com/docs/reference/connection-types)
@@ -111,24 +130,24 @@ Record `direct`, DERP `relay`, or `peer-relay` as reported, together with networ
 
 ## Repeatable measurement checklist
 
-First establish a Windows-to-Mac or Mac-to-Windows session on real hardware. Use a local recovery route, view-only first, and explicit input approval. Do not include lock, restart, clipboard writes, or file transfers in a passive capture benchmark without deliberately enabling those operations.
+Use a local recovery route, view-only first, and explicit input approval. Do not include lock, restart, clipboard writes, or file transfers in a passive capture benchmark without deliberately enabling those operations.
 
-1. **Record the environment.** Source commit and build mode; host/viewer OS and architecture; CPU/GPU; power state; monitor pixels, scale, rotation, and layout; OS permissions; Tailscale version/path; approximate available link bandwidth.
+1. **Record the environment.** Source commit and build mode; host/viewer OS and architecture; CPU/GPU and encoder; power state; monitor pixels, scale, rotation, and layout; OS permissions; Tailscale version/path; approximate available link bandwidth.
 2. **Use repeatable screen content.** Idle desktop, text scrolling, dragging a window, and a motion-heavy scene. Record the same actions for every candidate implementation.
-3. **Measure stages.** Capture/encode duration, capture-gate wait, encoded bytes, request completion, local decode/presentation, successful update intervals, input response, and disconnect/recovery time. Record host/viewer CPU, memory, and GPU use where available.
+3. **Measure stages.** Capture and encode time, encoded bytes, decode and draw time, drawn-frame intervals, fallbacks to images, input response, and disconnect/recovery time. The viewer's **Connection details** panel shows smoothness, late frames, decode time, and encryption. Record host/viewer CPU, memory, and GPU use where available.
 4. **Compare one and multiple displays.** Start with one viewer window, then two existing monitors in the same session. Include mixed-DPI and headless/disconnected-display cases where supported. Record skipped/error frames and queue growth.
 5. **Test impaired paths.** Include direct and relayed paths, interruptions, sleep/wake, slower bandwidth, and a peer that stops reading. Keep pending work and memory bounded; denial and revocation must still take effect.
 6. **Publish distributions and limits.** State sample count, run duration, workload, median/tail values, failure count, and test method. Enter actual observations in [VALIDATION.md](VALIDATION.md); leave unmeasured fields unmeasured.
 
-Use a single monotonic clock for local stage timings. Host capture timestamps and viewer wall-clock times cannot establish one-way latency unless their clocks are synchronized and the synchronization error is stated. For end-to-end input-to-image latency, use an instrumented loop or high-speed recording with a documented method. A local loopback smoke test cannot establish internet, DERP, Mac, or Linux performance.
+Use a single monotonic clock for local stage timings. Host capture timestamps and viewer wall-clock times cannot establish one-way latency unless their clocks are synchronized and the synchronization error is stated. For end-to-end input-to-image latency, use an instrumented loop or high-speed recording with a documented method. A local loopback test cannot establish internet, DERP, Mac, or Linux performance.
 
-## Improvement order
+## Next measurements
 
-1. **Add measurements before tuning.** Stage timings and a bounded, redacted diagnostic summary should reveal whether capture, encoding, network, or presentation dominates.
-2. **Improve connection and frame scheduling.** Evaluate a persistent certificate-pinned transport, shared per-monitor capture, bounded frame queues, cancellation, and per-host bandwidth allocation. Preserve immediate authorization checks and revocation on reused connections. Skip unnecessary hidden/minimized views without hiding a failed connection.
-3. **Adopt efficient native capture.** Evaluate GPU-backed capture on Windows, ScreenCaptureKit on macOS, and supported portal/PipeWire capture on Wayland. Validate cursor, privacy permissions, display changes, and device-loss recovery independently on each platform.
-4. **Negotiate a video path.** Add established codecs, hardware encode/decode where available, congestion adaptation, frame pacing, quality/resolution controls, and a text-oriented mode. Keep a bounded fallback and report the codec/encoder actually in use.
-5. **Scale to multiple outputs.** Budget capture/encode work across existing displays and any future virtual outputs. Test independent window focus, display-specific geometry, input release, and session shutdown under load.
-6. **Add audio separately.** Audio requires its own capture/transport, permission state, buffering, and synchronization work; there is no audio channel in the preview.
+1. **Click-to-screen latency** on one PC and between two computers, with a documented method.
+2. **Cross-device video** on direct and relayed Tailscale paths, with Windows, Apple-silicon Mac, and Windows on ARM viewers.
+3. **Other encoders:** AMD and Intel hardware H.264 on Windows hosts.
+4. **Busy content** against the bitrate target, and behavior on slow and lossy links.
+5. **Long runs and resource use**, including several monitors streaming at once.
+6. **Video from Mac and Linux hosts.** Evaluate ScreenCaptureKit on macOS and supported portal/PipeWire capture on Wayland; validate cursor, privacy permissions, display changes, and device-loss recovery on each platform.
 
-The target is responsive, predictable control with bounded resource use. No delivered FPS or latency target is claimed until a native-device benchmark supports it. Adding a [virtual monitor](VIRTUAL_DISPLAYS.md) creates desktop space only; it does not accelerate the PNG pipeline or provide an additional independent user session.
+Audio needs its own capture, transport, permission state, buffering, and synchronization work; there is no audio channel in the preview. Adding a [virtual monitor](VIRTUAL_DISPLAYS.md) creates desktop space only; it does not make the stream faster or provide an additional independent user session.

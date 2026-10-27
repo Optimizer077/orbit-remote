@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { Check, Clipboard, CloudMoon, Copy, FileText, FolderOpen, Laptop, Loader2, LockKeyhole, Monitor, Moon, MousePointer2, Network, Palette, Power, ShieldCheck, SlidersHorizontal, Sun, Zap } from 'lucide-react';
-import { api, errorMessage, invoke, securityCode, type HostSettings, type HostStatus, type ThemePreference } from '../api';
+import { api, errorMessage, invoke, securityCode, type HostRuntime, type HostSettings, type HostStatus, type ThemePreference } from '../api';
 import { platformLabel } from './DevicesPage';
 import './pages.css';
 
@@ -11,7 +11,46 @@ export type SettingsPageProps = {
   onSaved: () => void;
   onError: (message: string) => void;
   aboutContent?: ReactNode;
+  runtime?: HostRuntime | null;
+  onIdentityRotated?: () => void;
 };
+
+function displayDate(value?: string | null, timeOnly = false) {
+  const date = value ? new Date(value) : null;
+  return date && Number.isFinite(date.getTime()) ? timeOnly ? date.toLocaleTimeString() : date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : 'Not available';
+}
+
+export function HostRecoveryNotice({ runtime, onRetry, onNavigate }: { runtime: HostRuntime | null; onRetry: () => Promise<void>; onNavigate: () => void }) {
+  const [retrying, setRetrying] = useState(false);
+  const supervisor = runtime?.supervisor;
+  const identity = runtime?.identity;
+  const interrupted = supervisor?.state === 'stopped' || supervisor?.state === 'reconnecting';
+  if (!interrupted && !identity?.warning) return null;
+  return <div className="op-recovery-notices">
+    {interrupted && <section className="op-recovery-notice" aria-label="Host recovery" role="status"><Power size={20} aria-hidden="true" /><div><strong>{supervisor.state === 'stopped' ? 'The background host has stopped.' : 'The background host is reconnecting.'}</strong><p>{supervisor.reason || 'Remote access is unavailable until the background host returns.'}</p><p>{supervisor.state === 'stopped' ? 'Automatic recovery has paused. Retry when you are ready.' : supervisor.nextRetryAt ? `Automatic retry at ${displayDate(supervisor.nextRetryAt, true)}. ${supervisor.restartsLeft} automatic retries remain.` : 'Waiting for the background host to return.'}</p></div>{supervisor.state === 'stopped' && <button className="button secondary small" disabled={retrying} onClick={async () => { setRetrying(true); try { await onRetry(); } finally { setRetrying(false); } }}>{retrying && <Loader2 size={14} className="spin" />}Retry host</button>}</section>}
+    {identity?.warning && <section className="op-recovery-notice" aria-label="Identity expiry warning" role="status"><ShieldCheck size={20} aria-hidden="true" /><div><strong>{identity.expired ? 'This computer’s identity has expired.' : `This computer’s identity expires in ${identity.daysRemaining} ${identity.daysRemaining === 1 ? 'day' : 'days'}.`}</strong><p>{identity.expired ? 'Remote access is disabled. Replace the identity locally, then pair your devices again.' : 'Plan to replace the identity before expiry. Every device will need to pair again.'}</p></div><button className="button secondary small" onClick={onNavigate}>Review identity</button></section>}
+  </div>;
+}
+
+function HostIdentitySettings({ status, runtime, onRotated, onError }: { status: HostStatus | null; runtime?: HostRuntime | null; onRotated?: () => void; onError: (message: string) => void }) {
+  const [confirmation, setConfirmation] = useState<string | null>(null);
+  const [acknowledged, setAcknowledged] = useState(false);
+  const [rotating, setRotating] = useState(false);
+  const identity = runtime?.identity || status?.identity;
+  const fingerprint = status?.host.fingerprint;
+  useEffect(() => { setConfirmation(null); setAcknowledged(false); }, [fingerprint]);
+  const rotate = async () => {
+    if (!confirmation || !acknowledged) return;
+    setRotating(true);
+    try {
+      const result = await api.rotateIdentity(confirmation);
+      setConfirmation(null); setAcknowledged(false);
+      if (result.requiresRePair) onRotated?.();
+    } catch (error) { onError(errorMessage(error)); }
+    finally { setRotating(false); }
+  };
+  return <section className="op-settings-card op-identity-settings" aria-labelledby="identity-settings-heading"><div className="op-settings-card-title"><span className="op-title-symbol"><ShieldCheck size={20} /></span><div><h2 id="identity-settings-heading">This computer’s identity</h2><p>Trusted pairing belongs to this identity.</p></div></div><dl className="op-settings-details"><div><dt>Certificate expires</dt><dd>{displayDate(identity?.expiresAt)}</dd></div><div><dt>Remote trust</dt><dd>{identity ? identity.expired ? 'Expired — local recovery required' : identity.warning ? 'Replacement due soon' : 'Current identity' : 'Not available'}</dd></div></dl><p className="op-setting-note">Replacing the identity ends sessions, invalidates invitations and removes pairing trust. All incoming and saved remote connections must pair again. Orbit never replaces it silently.</p>{confirmation ? <div className="op-identity-confirmation" role="group" aria-label="Confirm identity replacement"><strong>Every device must pair again.</strong><p>Continue only when you can set up each trusted computer again. The system confirmation lets you cancel before anything changes.</p><label><input type="checkbox" checked={acknowledged} disabled={rotating} onChange={event => setAcknowledged(event.target.checked)} />I understand that every device must pair again.</label><div className="op-identity-actions"><button className="button secondary small" disabled={rotating} onClick={() => { setConfirmation(null); setAcknowledged(false); }}>Cancel replacement</button><button className="button danger small" disabled={!acknowledged || rotating} onClick={() => void rotate()}>{rotating && <Loader2 size={14} className="spin" />}Continue to system confirmation</button></div></div> : <button className="button secondary small" disabled={!fingerprint} onClick={() => { setConfirmation(fingerprint || null); setAcknowledged(false); }}>Replace identity…</button>}</section>;
+}
 
 function SettingSwitch({ checked, label, disabled, onChange }: { checked: boolean; label: string; disabled?: boolean; onChange: (value: boolean) => void }) {
   return <button type="button" className={`op-switch ${checked ? 'on' : ''}`} role="switch" aria-checked={checked} aria-label={label} disabled={disabled} onClick={() => onChange(!checked)}><span /></button>;
@@ -46,7 +85,7 @@ export function UnattendedAvailability({ status }: { status: HostStatus | null }
   return <section className="op-settings-card op-availability"><div className="op-settings-card-title"><span className="op-title-symbol"><LockKeyhole size={20} /></span><div><h2>Unattended availability</h2><p>Know when this host is within reach.</p></div></div><span className="op-availability-label"><i className={`op-status-dot ${unlocked ? 'online' : ''}`} />{unlocked ? 'Signed in and unlocked' : status?.sessionState && /locked|secure/.test(status.sessionState) ? 'Desktop is locked or protected' : 'Desktop availability not confirmed'}</span><p className="op-availability-summary">This preview needs an unlocked, signed-in desktop. Locked-screen access and recovery before sign-in are not available yet.</p>{notes.length > 0 && <ul>{notes.map(note => <li key={note}>{note}</li>)}</ul>}</section>;
 }
 
-export function SettingsPage({ status, theme, onThemeChange, onSaved, onError, aboutContent }: SettingsPageProps) {
+export function SettingsPage({ status, runtime, theme, onThemeChange, onSaved, onIdentityRotated, onError, aboutContent }: SettingsPageProps) {
   const [settings, setSettings] = useState<HostSettings>({ hostName: '', allowControl: false, allowClipboard: false, allowFiles: false, allowPower: false, startAtLogin: false });
   const [saving, setSaving] = useState(false);
   const [localError, setLocalError] = useState('');
@@ -71,6 +110,7 @@ export function SettingsPage({ status, theme, onThemeChange, onSaved, onError, a
       <section className="op-settings-card"><div className="op-settings-card-title"><span className="op-title-symbol"><Laptop size={20} /></span><div><h2>This host</h2><p>How this computer appears in your private network.</p></div></div><label className="op-field-label" htmlFor="host-name">COMPUTER NAME</label><input className="op-text-input" id="host-name" maxLength={80} disabled={!status} value={settings.hostName} placeholder="Name your computer" onChange={event => setSettings(current => ({ ...current, hostName: event.target.value }))} /><dl className="op-settings-details"><div><dt>Operating system</dt><dd>{status ? platformLabel(status.host.platform) : 'Waiting for host'}</dd></div><div><dt>Service version</dt><dd>{status?.host.version || 'Not available'}</dd></div></dl>{code && <div className="op-host-code"><span><ShieldCheck size={16} />This computer’s security code</span><code>{code}</code><button className="op-text-button" onClick={() => void copyCode()}><Copy size={14} />Copy security code</button><p>Compare this with the code shown for this computer on your other device.</p></div>}</section>
       <section className="op-settings-card"><div className="op-settings-card-title"><span className="op-title-symbol"><SlidersHorizontal size={20} /></span><div><h2>Remote access</h2><p>Host policy and pairing permissions must both allow an action.</p></div></div>{capabilities.map(({ key, capability, icon: Icon, title, detail, perPairing }) => <div className="op-setting-row" key={key}><span className="op-setting-icon"><Icon size={19} /></span><div><strong>{title}</strong><p>{detail}</p>{status && !status.capabilities[capability] && <span className="op-capability-note">Unavailable on this host</span>}</div>{perPairing ? <span className="op-pairing-tag">Per pairing</span> : <SettingSwitch label={title} checked={Boolean(settings[key])} disabled={!status || !status.capabilities[capability]} onChange={value => setSettings(current => ({ ...current, [key]: value }))} />}</div>)}</section>
       <section className="op-settings-card"><div className="op-settings-card-title"><span className="op-title-symbol"><Zap size={20} /></span><div><h2>Stay within reach</h2><p>Ready after you sign in.</p></div></div><div className="op-setting-row"><span className="op-setting-icon"><Power size={19} /></span><div><strong>Start Orbit at sign-in</strong><p>Launch automatically when you sign in to this computer.</p><span className="op-capability-note">Available in supported installed desktop builds. This does not provide pre-login access.</span></div><SettingSwitch label="Start Orbit at sign-in" checked={Boolean(settings.startAtLogin)} disabled={!status?.settings.startAtLoginSupported} onChange={value => setSettings(current => ({ ...current, startAtLogin: value }))} /></div></section>
+      <HostIdentitySettings status={status} runtime={runtime} onRotated={onIdentityRotated} onError={onError} />
       {aboutContent && <div className="op-about-content">{aboutContent}</div>}
     </div><aside className="op-settings-aside"><section className="op-settings-card"><div className="op-settings-card-title"><span className="op-title-symbol"><Network size={20} /></span><div><h2>Network health</h2><p>Reported by this host</p></div></div><span className={`op-network-label ${status?.host.tailscale.connected ? 'ready' : ''}`}><i className={`op-status-dot ${status?.host.tailscale.connected ? 'online' : ''}`} />{status?.host.testMode ? 'Local test mode' : status?.host.tailscale.connected ? 'Tailscale connected' : 'Connection needed'}</span><dl className="op-network-details"><div><dt>Tailscale</dt><dd>{status ? status.host.tailscale.available ? 'Detected' : 'Not detected' : 'Checking'}</dd></div><div><dt>Private address</dt><dd>{status?.host.tailscale.ip || 'Not available'}</dd></div><div><dt>DNS name</dt><dd>{status?.host.tailscale.dnsName || 'Not available'}</dd></div><div><dt>Host port</dt><dd>{settings.listenPort || 'Not available'}</dd></div></dl>{status?.host.tailscale.error && <p className="op-inline-error">{status.host.tailscale.error}</p>}</section><UnattendedAvailability status={status} /><div className="op-trust-explainer"><ShieldCheck size={25} /><h2>Two layers of trust.</h2><p>Tailscale provides your private route. Orbit pairing decides which devices can connect and what each may do.</p><p>Keep your tailnet policy limited to the people and devices you trust.</p></div></aside></div>
   </section>;

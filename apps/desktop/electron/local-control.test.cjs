@@ -24,7 +24,9 @@ async function fixture(t, behavior) {
         const clientPort = socket.remotePort;
         const proof = crypto.createHmac('sha256', Buffer.from(proofKey, 'base64url')).update(`orbit-child-proof-v1\n${challenge}\n${pid}\n${server.address().port}\n${clientPort}`).digest('base64url');
         let value = { version: 1, pid, challenge, clientPort, proof };
-        const custom = behavior?.({ value, socket, headers });
+        const sign = candidate => ({ ...candidate, proof: crypto.createHmac('sha256', Buffer.from(proofKey, 'base64url'))
+          .update(`orbit-child-proof-v1\n${candidate.challenge}\n${candidate.pid}\n${server.address().port}\n${candidate.clientPort}`).digest('base64url') });
+        const custom = behavior?.({ value, socket, headers, sign });
         if (custom === false) return;
         if (custom) value = custom;
         const body = JSON.stringify(value);
@@ -63,7 +65,7 @@ test('fake listener never receives bearer, identity route or private body', asyn
 });
 
 test('a proof relayed with a different client TCP port is rejected before operation bytes', async t => {
-  const f = await fixture(t, ({ value }) => ({ ...value, clientPort: value.clientPort + 1 })); const agent = f.makeAgent(); t.after(() => agent.destroy());
+  const f = await fixture(t, ({ value, sign }) => sign({ ...value, clientPort: value.clientPort + 1 })); const agent = f.makeAgent(); t.after(() => agent.destroy());
   await assert.rejects(f.send(agent), /proof failed/);
   assert.doesNotMatch(f.received.join(''), /Authorization|client-identity|PRIVATE-REQUEST/);
 });

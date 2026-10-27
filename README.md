@@ -5,18 +5,18 @@
   </picture>
   <h1>Your world. Within reach.</h1>
   <p><strong>A native desktop workspace for reaching your own computers over Tailscale: encrypted end to end, hardware-accelerated.</strong></p>
-  <p>See your screen at up to 60 fps with hardware H.264 (beta). Take control with permission. Keep every paired device accountable.</p>
+  <p>See your screen as hardware H.264 video, measured at 59 fps on a live 1440p desktop. Take control with permission. Keep every paired device accountable.</p>
   <p>
     <a href="docs/VALIDATION.md"><img src="https://img.shields.io/badge/status-development_preview-d9c38b?style=flat-square" alt="Status: development preview"></a>
-    <a href="https://github.com/Optimizer077/orbit-remote/releases/tag/v0.1.0-preview.4"><img src="https://img.shields.io/badge/download-Windows_x64-b2e6c5?style=flat-square" alt="Download: Windows x64 preview"></a>
+    <a href="https://github.com/Optimizer077/orbit-remote/releases/tag/v0.1.0-preview.5"><img src="https://img.shields.io/badge/download-Windows_x64-b2e6c5?style=flat-square" alt="Download: Windows x64 preview"></a>
     <a href="docs/ARCHITECTURE.md"><img src="https://img.shields.io/badge/network-Tailscale-aecaff?style=flat-square" alt="Network: Tailscale"></a>
     <a href="docs/ENCRYPTION.md"><img src="https://img.shields.io/badge/encryption-WireGuard_%2B_mutual_TLS-b2e6c5?style=flat-square" alt="Encryption: WireGuard plus mutual TLS, two layers"></a>
     <a href="docs/ENCRYPTION.md"><img src="https://img.shields.io/badge/identity-pinned_certificates_%C2%B7_revocable-b2e6c5?style=flat-square" alt="Identity: pinned certificates, revocable at any time"></a>
-    <a href="#performance"><img src="https://img.shields.io/badge/video-hardware_H.264_%C2%B7_59_fps_live_(beta)-aecaff?style=flat-square" alt="Video: hardware H.264 stream, 59 frames per second measured live, beta"></a>
+    <a href="#performance"><img src="https://img.shields.io/badge/video-hardware_H.264_%C2%B7_59_fps_measured-aecaff?style=flat-square" alt="Video: hardware H.264 stream, on by default for Windows hosts, 59 frames per second measured live on one PC"></a>
     <a href="docs/MACOS.md"><img src="https://img.shields.io/badge/macOS-Apple_silicon_tested-b2e6c5?style=flat-square" alt="macOS: Apple silicon tested, including a real view-only session with Windows"></a>
   </p>
   <p>
-    <a href="https://github.com/Optimizer077/orbit-remote/releases/tag/v0.1.0-preview.4"><strong>Download Windows</strong></a> ·
+    <a href="https://github.com/Optimizer077/orbit-remote/releases/tag/v0.1.0-preview.5"><strong>Download Windows</strong></a> ·
     <a href="docs/MACOS.md">Continue on a Mac</a> ·
     <a href="docs/ARCHITECTURE.md">How it works</a> ·
     <a href="TODO.md">Roadmap</a> ·
@@ -33,7 +33,7 @@
   </picture>
 </p>
 
-> **Public development preview, with explicit limits.** Windows has local runtime evidence. A real view-only session between Windows and an Apple-silicon Mac works in both directions (preview.4). The hardware video stream (59.3 fps live at 2560×1440 on one PC) ships as a beta in the next release. Cross-device control, Intel Macs, and Linux still need validation. Downloads are unsigned; unattended access before login and production security are not established.
+> **Public development preview, with explicit limits.** Windows has local runtime evidence. A real view-only session between Windows and an Apple-silicon Mac works in both directions. Since preview.5, Windows hosts stream hardware H.264 video by default (59.3 fps live at 2560×1440 on one PC, still labeled beta in the app) and fall back to images when video can't run. Click-to-screen latency, video between two computers, cross-device control, Intel Macs, and Linux still need measurement or validation. Downloads are unsigned; unattended access before login and production security are not established.
 
 Orbit Remote connects **your own** Windows, macOS, and Linux computers over your private [Tailscale](https://tailscale.com) network. Every installation is both a viewer and a host. Access comes only from an invitation you create, a certificate pinned at pairing, and the permissions the host's owner grants. Orbit runs no server or account, and it never changes your startup, firewall, or Tailscale policy on its own.
 
@@ -51,7 +51,7 @@ Orbit Remote connects **your own** Windows, macOS, and Linux computers over your
 | **Permission, not presumption** | **Honest status** | **One app, three systems** |
 | View, control, clipboard, files, and power are separate grants that the host enforces and you can revoke. | The viewer shows the encryption actually negotiated. Unsupported states are labeled, never faked. | Windows x64 is exercised today and Windows on ARM builds are ready; Apple-silicon Macs are tested with Windows; Linux awaits device validation. |
 | **Hardware-accelerated** | **Light on the network** | **Fails safe** |
-| GPU capture, hardware H.264 and hardware decode: 59.3 fps at native 2560×1440, measured live (beta, next release). | About 300 KB/s for a live 1440p screen, against 12.5 MB/s for full images. An idle screen sends almost nothing. | If the stream can't run, Orbit falls back to images. Revoking a device ends its stream within a second. |
+| GPU capture, hardware H.264 and hardware decode, on by default for Windows hosts: 59.3 fps at native 2560×1440, measured live on one PC. | About 300 KB/s for a live 1440p screen, against 12.5 MB/s for full images. An idle screen sends almost nothing. | If the stream can't run, Orbit falls back to images. Revoking a device ends its stream within a second. |
 
 ## Why Orbit
 
@@ -85,7 +85,7 @@ Orbit is for reaching your own computers, or ones whose owner explicitly invited
 2. **Outbound checks.** The main process accepts only a literal Tailscale IP, offers only strong TLS suites, and presents this computer's certificate.
 3. **Nothing goes to an unverified host.** Before a single HTTP byte is sent, the viewer checks the host's certificate against the SHA-256 pin saved at pairing, and checks that the negotiated encryption meets policy.
 4. **The host's four gates.** Tailscale delivers only tailnet traffic to port `47832`. The host then ① drops any link below the TLS policy, ② confirms the source with `tailscale whois` and matches the viewer's certificate to an unrevoked pairing, ③ applies that device's grants, and ④ opens a session. One device controls at a time; others can view.
-5. **Screen updates.** The host captures the chosen monitor and sends it over the double-encrypted link. The viewer shows it with the measured encryption, for example `TLS 1.3 · AES-256-GCM · X25519`.
+5. **Screen updates.** A Windows host captures the chosen monitor on its GPU, encodes hardware H.264, and sends one continuous video stream over the double-encrypted link; the viewer decodes it in hardware. If video can't run, or the host is a Mac or Linux computer, the host sends images instead. The viewer shows the measured encryption, for example `TLS 1.3 · AES-256-GCM · X25519`.
 6. **Input needs two yeses.** The owner must have granted control, and you must choose **Take control**. Input is bounded and coalesced, and held keys are released if the viewer disappears. **Esc** gives control back.
 7. **Ending is final.** Disconnect, **Disconnect all**, or a host stop ends the session with `410`, and the viewer never silently reconnects. Revoking the device (`401`) removes its access.
 
@@ -165,7 +165,7 @@ The invitation is a secret for five minutes and works once. The viewer verifies 
 | **View** | See the chosen screen | The default: new invitations are view-only |
 | **Control** | Mouse and keyboard | Also needs **Take control** on the viewer; **Esc** releases it |
 | **Clipboard** | Read and write text | Explicit actions only, never automatic sync |
-| **Files** | Upload and download | One shared folder, no overwrite, 32 MiB per transfer |
+| **Files** | Upload and download | One shared folder, no overwrite, 32 MiB per transfer; received files are marked as downloaded from the internet |
 | **Power** | Lock or restart | Requires Control, and the host's own policy must allow it |
 
 The host enforces every grant on every request, and the owner can revoke a device at any time.
@@ -199,7 +199,7 @@ Read [SECURITY.md](SECURITY.md) before deployment. Report security concerns priv
 
 ### Download for Windows
 
-Get the [preview release](https://github.com/Optimizer077/orbit-remote/releases/tag/v0.1.0-preview.4):
+Get the [preview release](https://github.com/Optimizer077/orbit-remote/releases/tag/v0.1.0-preview.5):
 
 | Download | Use it when |
 |---|---|
@@ -245,44 +245,65 @@ The script detects Apple silicon or Intel and builds a matching host and package
 
 | Area | What you get today |
 |---|---|
-| Workspace | Overview, Devices, Connections, Activity, and Settings, all showing real host data, plus a **Ctrl/⌘ K command palette** to jump anywhere, connect, or switch themes. |
-| Trust | Five-minute single-use invitations, pinned certificates, mutual TLS identities, and comparable security codes. |
-| Encryption | WireGuard + mutual TLS 1.3 (or 1.2 ECDHE + AEAD). Weaker links are refused, and the negotiated encryption is shown live. |
-| Permissions | Separate view, control, clipboard, files, and power grants, enforced on the host. |
-| Viewing | Real monitors, display selection, fit and 1:1 modes, separate windows for existing host displays, and a floating session bar with a **measured link-quality meter** and a Reconnecting / Ended overlay. |
-| Input | Native keyboard and mouse, explicit **Take control**, bounded queues, and automatic release of held keys. |
-| Sharing | Many viewers, one controller, revocation, and **Disconnect all**. A host-ended session is never auto-resumed. |
-| Clipboard & files | Explicit text clipboard; one chosen transfer folder, no overwrite, 32 MiB per transfer, with timeouts that scale with file size. |
-| Power | Optional lock and restart, gated by host policy and the device's grant. |
-| Reliability | Host supervision, owner-exit shutdown, and renewal that rechecks identity and permissions. |
+| **Workspace** | Overview, Devices, Connections, Activity, and Settings, all showing real host data, plus a **Ctrl/⌘ K command palette** to jump anywhere, connect, or switch themes. |
+| **Trust** | Five-minute single-use invitations, pinned certificates, mutual TLS identities, and comparable security codes. A device whose identity changed is blocked, and the app says so. |
+| **Encryption** | WireGuard + mutual TLS 1.3 (or 1.2 ECDHE + AEAD). Weaker links are refused, and the negotiated encryption is shown live. |
+| **Permissions** | Separate view, control, clipboard, files, and power grants, enforced on the host. |
+| **Streaming** | Hardware H.264 video from Windows hosts, on by default: GPU capture, low-latency hardware encoding, and hardware decoding in the viewer. Images when video can't run. |
+| **Viewer** | Full-window viewer with **Fit** / **1:1** and native fullscreen, pop-out windows for other host displays, a **smoothness meter** and **Connection details**, and a cursor drawn locally by the viewer. Keyboard focus is visible, and reconnects are announced to screen readers. |
+| **When the remote changes** | If the remote display is asleep, the viewer says **Display asleep** instead of showing a frozen picture, releases held keys, and checks again every few seconds. With control permission you can press **Wake display** (once every 5 s; not in view-only sessions). Updates pause while the window is minimized, and **Reconnect** is one click after a host restart. |
+| **Input** | Native keyboard and mouse, explicit **Take control**, bounded queues, automatic release of held keys, and modifier keys applied on Mac hosts. |
+| **Sharing** | Many viewers, one controller, revocation, and **Disconnect all**. A device you disconnected shows **Disconnected by you · Allow again**. A host-ended session is never auto-resumed. |
+| **Clipboard & files** | Explicit text clipboard; one chosen transfer folder, no overwrite, 32 MiB per transfer, timeouts that scale with file size. Received files are marked as downloaded from the internet. |
+| **Power** | Optional lock and restart, gated by host policy and the device's grant. |
+| **Reliability** | Host supervision, owner-exit shutdown, bounded shutdown and drain, per-device and per-host stream limits, and renewal that rechecks identity and permissions. |
+| **Hardening** | The installed app can't be run as Node.js, ignores `NODE_OPTIONS` and inspect flags, and loads only from its integrity-checked archive. |
 
-In preview.4, screen delivery polls one PNG image per update. Windows hosts skip unchanged images, and optional lower-resolution frames reduce transferred bytes. Faster frames and a hardware video stream are in development: see [Performance](#performance). Audio is not implemented.
+Audio is not implemented.
 
 ## Performance
 
-Frame rate is the current priority. Preview.4 sends one full image per update. The next release replaces that with a hardware video stream, the approach the fastest remote-desktop tools use. Measured live on one PC, it reaches **59.3 frames per second at native 2560×1440** with 0.6 ms decode and about 300 KB/s, against about 20 frames per second at 12.5 MB/s for the picture path.
+Windows hosts stream hardware H.264 video by default. The host captures the screen on the GPU with DXGI Desktop Duplication, encodes it with the GPU's H.264 encoder through Windows Media Foundation (low-latency mode, no B-frames), and sends one continuous stream inside the pinned mutual-TLS link. The viewer decodes it with WebCodecs, which Chromium backs with D3D11VA on Windows, VideoToolbox on macOS, and VA-API on Linux. If video can't run, the session falls back to images.
 
 <p align="center">
   <picture>
     <source media="(max-width: 767px) and (prefers-color-scheme: dark)" srcset="docs/assets/diagrams/pipeline-narrow.svg">
     <source media="(max-width: 767px)" srcset="docs/assets/diagrams/pipeline-narrow-light.svg">
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/diagrams/pipeline.svg">
-    <img src="docs/assets/diagrams/pipeline-light.svg" width="1000" alt="The hardware streaming pipeline in development, measured per stage at 3024 by 1898: GPU capture 4.4 ms per changed frame, hardware H.264 encode 5.8 to 7.6 ms (2.5 to 2.9 ms at 1080p), one stream of 2 to 26 KB per update inside the pinned mutual-TLS link, hardware decode 0.5 to 0.7 ms (2.4 to 3.3 ms on a Mac), and drawing in 0.2 ms: about 11 to 13 ms per frame plus the network, compared with about 150 to 220 ms and 1 MB per frame for the screenshot path in preview.4.">
+    <img src="docs/assets/diagrams/pipeline-light.svg" width="1000" alt="The hardware streaming pipeline, measured per stage at 3024 by 1898: GPU capture 4.4 ms per changed frame, hardware H.264 encode 5.8 to 7.6 ms (2.5 to 2.9 ms at 1080p), one stream of 2 to 26 KB per update inside the pinned mutual-TLS link, hardware decode 0.5 to 0.7 ms (2.4 to 3.3 ms on a Mac), and drawing in 0.2 ms. Measured live on one PC: 59.3 frames per second at native 2560 by 1440 with about 300 KB/s. Click-to-screen latency is not measured yet.">
   </picture>
 </p>
 
-| Step | Status | Measured |
-|---|---|---|
-| Real Windows ↔ Mac session | Preview.4, over a Tailscale relay | Works both ways, view-only; about 1.8 s per full-screen PNG update. Mac → Windows negotiated TLS 1.3; Windows → Mac TLS 1.2 (ECDHE + AES-GCM) |
-| Connection reuse | Next release | Removes a TLS handshake per frame, about 1.2 s per frame on a 150 ms link |
-| Faster viewer | Next release | Binary frames on a canvas with no fixed pause: 2.0 → 3.75 updates per second on one PC |
-| PNG or JPEG, whichever is smaller | Next release | Full-screen frame 1044 → 497 KiB; on a simulated 2 Mbit/s link with 1 % loss, 5.2 → 2.5 s per frame |
-| GPU screen capture | Next release (beta) | 4.4 ms per changed frame, against 155 ms for today's capture path; an unchanged screen costs nothing |
-| Hardware H.264 encode | Next release (beta) | 2.5–2.9 ms per 1080p frame; 2–26 KB per update instead of about 1 MB |
-| Hardware decode in the viewer | Next release (beta) | 0.5–0.7 ms on Windows, 2.4–3.3 ms on an Apple-silicon Mac; 60 and 120 fps with no dropped frames |
-| **Live video stream, end to end** | Next release (beta) | **59.3 frames/s at native 2560×1440** (1,780 frames in 30 s), 0.6 ms decode, about 300 KB/s; the picture path on the same screen: about 20 frames/s at 12.5 MB/s. Loopback on one PC |
+### Measured
 
-Targets, set against what leading tools publish: 60 fps on a LAN, 10–16 ms of added latency, no freeze longer than 100 ms at 1 % packet loss, and text as sharp as full-color 4:4:4. The 60 fps target is reached on loopback; cross-device runs (Windows, Apple-silicon Mac, Windows on ARM) and input-to-screen latency are measured next. Methods, sample sizes, and caveats are in [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+Every result comes from one Windows PC with an NVIDIA RTX GPU, except the Mac decode figure. Per-stage timings are medians on synthetic screen content.
+
+| What | Result | How it was measured |
+|---|---|---|
+| GPU capture | 4.4 ms per changed frame; an unchanged screen costs almost nothing | Per stage, 3024×1898 |
+| Hardware encode | 2.5–2.9 ms per 1080p frame; 5.8–7.6 ms at 3024×1898 | Per stage, NVIDIA encoder |
+| Viewer decode | 0.5–0.7 ms; 2.4–3.3 ms on an Apple-silicon Mac | Per stage, 1080p and 3024×1898 |
+| Draw | 0.2 ms | Per stage, canvas |
+| **Live stream** | **59.3 fps at native 2560×1440**, about 300 KB/s | A real desktop for 30 s (1,780 frames), host and viewer on the same PC. Images on the same screen: about 20 fps at 12.5 MB/s |
+| Synthetic stream | 3601 of 3601 frames at 60.0 fps; frame interval p95 17.7 ms | A generated 60 fps test source through the full pipeline for 60 s |
+| Two viewers | Both held 60 fps | The same synthetic test, two viewers at once |
+
+| Recovery | Time |
+|---|---|
+| Video back after the host restarts | About 0.45 s after the restarted host is healthy (1.9 s from stopping it) |
+| One-click **Reconnect** | About 0.42 s |
+| Change quality without restarting the stream | About 0.13–0.15 s |
+| Capture reset | About 0.15 s gap |
+
+### Not measured yet
+
+- **Click-to-screen latency.** The stage times add up to about 11–13 ms per frame plus the network. That sum is not a latency measurement.
+- **Video between two computers.** All stream results above come from one PC. Windows video has reached a Mac viewer, but sustained cross-device playback has not been measured.
+- **AMD and Intel encoders.** Only an NVIDIA encoder has been measured.
+- **Mac and Linux hosts.** They have no video stream yet and send images.
+- **Very busy screens.** Noisy, fast-changing content can exceed the bitrate target.
+
+Methods, sample sizes, and caveats are in [docs/PERFORMANCE.md](docs/PERFORMANCE.md). Every experiment, including failed runs, rejected approaches, and the decisions they led to, is recorded in [docs/RESULTS.md](docs/RESULTS.md).
 
 ## Themes
 
@@ -301,7 +322,8 @@ Every theme meets WCAG AA text contrast, uses no text smaller than 12 px, and re
 | Capability | Windows | macOS | Linux |
 |---|---|---|---|
 | Desktop GUI | Exercised locally | Exercised on Apple silicon ([Mac record](docs/MACOS-VALIDATION.md)) | Needs native build/test |
-| Unlocked capture | Native GDI, exercised | Native helper, exercised with Screen Recording consent (Retina + external display) | X11 + ffmpeg |
+| Unlocked capture | GPU (DXGI) with GDI fallback, exercised | Native helper, exercised with Screen Recording consent (Retina + external display) | X11 + ffmpeg |
+| Hardware video stream | H.264 host, measured with an NVIDIA GPU | Viewer decode measured; Mac hosts send images | Hosts send images |
 | Input | SendInput adapter | CoreGraphics + Accessibility, exercised | X11 + xdotool |
 | Text clipboard | Win32 | pbcopy/pbpaste, exercised | X11 + xclip |
 | Locked/sign-in/UAC screen | **Unsupported** | **Unsupported** | **Unsupported** |
@@ -313,11 +335,11 @@ Every theme meets WCAG AA text contrast, uses no text smaller than 12 px, and re
 
 | Status | What that means today |
 |---|---|
-| **Exercised locally** | Windows capture, certificate-authenticated loopback sessions, pairing and revocation, link policy, themes, and packaged-app recovery. See the [validation record](docs/VALIDATION.md). |
-| **Native evidence and remaining validation** | Apple silicon Mac adapters were exercised locally ([Mac record](docs/MACOS-VALIDATION.md)), and a real view-only Windows ↔ Mac session was tested in both directions on preview.4 ([validation record](docs/VALIDATION.md)). Cross-device control, Intel Macs, and Linux remain pending. |
-| **Planned / unsupported** | Locked and sign-in screens, access before login, Wayland, virtual monitors, hardware video (in development, see [Performance](#performance)), audio, and signed updates. See [next steps](TODO.md). |
+| **Exercised locally** | Windows capture, the hardware video stream on one PC, certificate-authenticated loopback sessions, pairing and revocation, link policy, themes, and packaged-app recovery. See the [validation record](docs/VALIDATION.md). |
+| **Native evidence and remaining validation** | Apple silicon Mac adapters were exercised locally ([Mac record](docs/MACOS-VALIDATION.md)), and a real view-only Windows ↔ Mac session was tested in both directions on preview.4 ([validation record](docs/VALIDATION.md)). Video between two computers, cross-device control, Intel Macs, and Linux remain pending. |
+| **Planned / unsupported** | Locked and sign-in screens, access before login, Wayland, virtual monitors, video from Mac and Linux hosts, audio, and signed updates. See [next steps](TODO.md). |
 
-Completed checks and their limits are recorded in the [validation record](docs/VALIDATION.md).
+This public repository carries product source snapshots and preview downloads. See the [validation record](docs/VALIDATION.md), [changelog](CHANGELOG.md), and [roadmap](TODO.md) for evidence and remaining work.
 
 ## Develop
 
@@ -335,7 +357,7 @@ dotnet run --project tests/Orbit.Host.Tests/Orbit.Host.Tests.csproj
 cd apps/desktop && npm test && npm run build
 ```
 
-For local-only testing, use `start-dev.ps1 -LoopbackTest` or `start-dev.sh --loopback-test`. This binds remote TLS to loopback and labels the UI **Local test mode**. Run the Windows checks above; on a Mac, use `bash scripts/check-mac.sh` for the native and desktop checks.
+For local-only testing, use `start-dev.ps1 -LoopbackTest` or `start-dev.sh --loopback-test`. This binds remote TLS to loopback and labels the UI **Local test mode**. Run the Windows checks above for the native host, desktop, build, and Electron tests. On a Mac, `bash scripts/check-mac.sh` runs the native and desktop checks.
 
 <details>
 <summary>Repository map</summary>
@@ -364,7 +386,8 @@ Packaging checks each executable's real OS and architecture; build native packag
 | [Security model](SECURITY.md) | [How your connection is encrypted](docs/ENCRYPTION.md) | [Contribution guide](CONTRIBUTING.md) |
 | [Validation record](docs/VALIDATION.md) | [Pairing and API protocol](docs/PROTOCOL.md) | [Release plan](docs/PLAN.md) |
 | [Changelog](CHANGELOG.md) | [Performance and measurement](docs/PERFORMANCE.md) | [Brand guide](docs/BRAND.md) |
-| | [Extra screens and virtual displays](docs/VIRTUAL_DISPLAYS.md) |  |
+| | [Experiments, results and decisions](docs/RESULTS.md) | |
+| | [Extra screens and virtual displays](docs/VIRTUAL_DISPLAYS.md) | [Contribution guide](CONTRIBUTING.md) |
 
 ## Contributing
 
@@ -372,6 +395,6 @@ Start with a small item from [TODO.md](TODO.md) and follow [CONTRIBUTING.md](CON
 
 Each computer generates its own identity. **Never copy keys or application-data folders between computers, or commit them.**
 
-This repository contains product source snapshots and tested preview downloads. See [the changelog](CHANGELOG.md) for released changes and [the roadmap](TODO.md) for remaining work.
+Public releases contain reviewed product snapshots. Report reproducible issues through the public repository and follow [CONTRIBUTING.md](CONTRIBUTING.md); report security concerns privately as described in [SECURITY.md](SECURITY.md).
 
 No software license is declared yet; license selection is tracked in the checklist. This preview is not a production security certification.
