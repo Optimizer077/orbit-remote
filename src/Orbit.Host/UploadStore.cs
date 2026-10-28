@@ -1,7 +1,19 @@
+using System.Runtime.InteropServices;
+
 namespace Orbit.Host;
 
-internal sealed class UploadStore(HostState state, IUploadMetadata metadata, Action? cleanupWarning = null)
+internal sealed class UploadStore(HostState state, IUploadMetadata metadata, Action? cleanupWarning = null, Func<string, long>? availableBytes = null)
 {
+    /// <summary>
+    /// Free-space floor for the transfer folder's volume (H-4). An upload starts only if the
+    /// volume keeps at least this much free after every in-flight upload is assumed to reach
+    /// its size limit, so a peer with the files grant cannot fill the (often system) disk.
+    /// </summary>
+    internal const long MinimumFreeBytes = 1L * 1024 * 1024 * 1024;
+    internal const string LowSpaceMessage = "The host's transfer folder is low on free disk space. Ask the host owner to free space before uploading.";
+    private readonly Func<string, long> available = availableBytes ?? AvailableBytes;
+    private readonly object reservationGate = new();
+    private long reservedBytes;
     private int warnedCleanup;
     internal const string StagingPrefix = ".orbit-upload-";
     private const string StagingSuffix = ".tmp";
@@ -15,7 +27,20 @@ internal sealed class UploadStore(HostState state, IUploadMetadata metadata, Act
     {
         var destination = state.GetSafeFilePath(name);
         if (File.Exists(destination) || Directory.Exists(destination)) throw Exists();
-        var staging = Path.Combine(Path.GetDirectoryName(destination)!, StagingPrefix + Guid.NewGuid().ToString("N") + StagingSuffix);
+        var folder = Path.GetDirectoryName(destination)!;
+        lock (reservationGate)
+        {
+            if (available(folder) - reservedBytes - maximumBytes < MinimumFreeBytes) throw new InvalidOperationException(LowSpaceMessage);
+            reservedBytes += maximumBytes;
+        }
+        try { return await ReceiveReservedAsync(name, destination, folder, body, maximumBytes, authorized, cancellationToken); }
+        finally { lock (reservationGate) reservedBytes -= maximumBytes; }
+    }
+
+    private async Task<long> ReceiveReservedAsync(string name, string destination, string folder, Stream body, long maximumBytes,
+        Func<bool> authorized, CancellationToken cancellationToken)
+    {
+        var staging = Path.Combine(folder, StagingPrefix + Guid.NewGuid().ToString("N") + StagingSuffix);
         var created = false;
         try
         {
@@ -91,6 +116,18 @@ internal sealed class UploadStore(HostState state, IUploadMetadata metadata, Act
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException) { warning?.Invoke(); }
         return removed;
     }
+
+    internal static long AvailableBytes(string folder)
+    {
+        if (!OperatingSystem.IsWindows()) return new DriveInfo(folder).AvailableFreeSpace;
+        // GetDiskFreeSpaceEx accepts any directory, including UNC paths, and honours per-user quotas.
+        if (!GetDiskFreeSpaceEx(folder, out var free, out _, out _)) throw new IOException("Free disk space for the transfer folder could not be read.");
+        return (long)Math.Min(free, long.MaxValue);
+    }
+
+    [DllImport("kernel32.dll", EntryPoint = "GetDiskFreeSpaceExW", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetDiskFreeSpaceEx(string directory, out ulong freeBytesAvailable, out ulong totalBytes, out ulong totalFreeBytes);
 
     internal static InvalidOperationException Exists() => new("That file exists. Choose another file name; remote uploads never overwrite files.");
 }

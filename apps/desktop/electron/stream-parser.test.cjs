@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { OrbitStreamParser, StreamProtocolError, parseConfig, MAX_ACCESS_UNIT } = require('./stream-parser.cjs');
+const { OrbitStreamParser, StreamProtocolError, parseConfig, MAX_ACCESS_UNIT, MAX_NAL_UNITS } = require('./stream-parser.cjs');
 
 const config = { codec: 'avc1.4D4028', width: 1920, height: 1080, codedWidth: 1920, codedHeight: 1088,
   physicalLeft: -1920, physicalTop: 0, physicalWidth: 1920, physicalHeight: 1080,
@@ -136,4 +136,41 @@ test('terminal enum is preserved, unknown bounded codes become stream_error, and
   }
   const { parser } = parserFixture(); parser.push(record(1, config));
   assert.throws(() => parser.push(record(4, { code: 'stream_error', error: 'x'.repeat(501) }, 1)), /terminal/);
+});
+
+// Access unit from NAL header bytes (each NAL gets two non-zero body bytes); start codes alternate 4/3 bytes unless given.
+const annexB = (headers, startCode) => Buffer.concat(headers.map((header, i) =>
+  Buffer.from([...(startCode ?? (i % 2 ? [0, 0, 1] : [0, 0, 0, 1])), header, 0x88, 0x84])));
+function pushUnit(bytes, keyframe) {
+  const { parser, records } = parserFixture(); parser.push(record(1, config));
+  if (!keyframe) parser.push(key()); // a delta follows a keyframe
+  try { parser.push(record(2, bytes, keyframe ? 1 : 2, 100n, keyframe ? 1 : 0)); }
+  catch (error) { assert.equal(records.at(-1).type, keyframe ? 'config' : 'access-unit', 'a rejected unit is never delivered'); throw error; }
+  return records.at(-1);
+}
+
+test('the keyframe flag must match the NAL slice types: IDR only in keyframes, never a non-IDR slice in one', () => {
+  // AUD, SPS, PPS, SEI then a two-slice IDR picture, as the host emits a keyframe; then a two-slice delta.
+  for (const startCode of [[0, 0, 1], [0, 0, 0, 1], undefined]) {
+    const keyUnit = pushUnit(annexB([0x09, 0x67, 0x68, 0x06, 0x65, 0x65], startCode), true);
+    assert.equal(keyUnit.keyframe, true);
+    assert.equal(keyUnit.data.byteLength, annexB([0x09, 0x67, 0x68, 0x06, 0x65, 0x65], startCode).length);
+    assert.equal(pushUnit(annexB([0x09, 0x06, 0x41, 0x41], startCode), false).keyframe, false);
+    assert.equal(pushUnit(annexB([0x67, 0x68, 0x25], startCode), true).keyframe, true, 'nal_ref_idc does not matter');
+    assert.throws(() => pushUnit(annexB([0x09, 0x41, 0x41], startCode), true), /keyframe access unit carries a non-IDR slice/);
+    assert.throws(() => pushUnit(annexB([0x67, 0x68, 0x65, 0x41], startCode), true), /non-IDR slice/);
+    assert.throws(() => pushUnit(annexB([0x09, 0x67, 0x68, 0x06], startCode), true), /keyframe access unit has no IDR slice/);
+    assert.throws(() => pushUnit(annexB([0x41, 0x65], startCode), false), /delta access unit carries an IDR slice/);
+    assert.throws(() => pushUnit(annexB([0x67, 0x68, 0x65], startCode), false), /IDR slice/);
+  }
+});
+
+test('access-unit NAL headers reject the forbidden bit and more than MAX_NAL_UNITS units', () => {
+  assert.throws(() => pushUnit(annexB([0x67, 0x68, 0xe5]), true), /forbidden NAL header bit/);
+  assert.throws(() => pushUnit(annexB([0x86, 0x41]), false), /forbidden/);
+  assert.throws(() => pushUnit(annexB([0xc1]), false), /forbidden/);
+  const slices = count => annexB([0x67, 0x68, ...Array(count - 2).fill(0x65)]);
+  assert.equal(pushUnit(slices(MAX_NAL_UNITS), true).keyframe, true);
+  assert.throws(() => pushUnit(slices(MAX_NAL_UNITS + 1), true), /too many NAL units/);
+  assert.throws(() => pushUnit(annexB(Array(MAX_NAL_UNITS + 1).fill(0x41)), false), /too many NAL units/);
 });

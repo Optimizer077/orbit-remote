@@ -63,6 +63,11 @@ try
     Check(Security.IsTailscaleAddress(IPAddress.Parse("fd7a:115c:a1e0::1234")), "Tailscale IPv6 accepted");
     foreach (var path in new[] { "../secrets", "..\\secrets", "C:password", "CON", "NUL.txt", "test.", "test ", "a/b", "a\\b", "", ".", "..", "COM1.txt", "a\0b" }) Reject(() => Security.ValidateFileName(path), "Unsafe filename rejected: " + path);
     Check(Security.ValidateFileName("hello.txt") == "hello.txt", "Valid filename accepted");
+    // H-10: device names Win32 still resolves, including trailing space/dot stems.
+    foreach (var path in new[] { "COM0", "lpt0.txt", "COM¹", "com².log", "LPT³.txt", "CONIN$", "conout$.txt", "CLOCK$", "CON .txt", "nul. .log", "AUX  .md", "PRN..txt" })
+        Reject(() => Security.ValidateFileName(path), "Reserved Windows device name rejected: " + path);
+    foreach (var path in new[] { "CONSOLE.txt", "COM10.txt", "LPT.txt", "com.txt", "CONIN.txt", "my CON.txt", "LPT⁴.txt" })
+        Check(Security.ValidateFileName(path) == path, "Non-device filename still accepted: " + path);
     Check(Security.TokenEquals("a", "a") && !Security.TokenEquals("a", "b") && !Security.TokenEquals(null, null), "Constant-time token comparison semantics");
     Check(Security.IsStrongTls(SslProtocols.Tls13, TlsCipherSuite.TLS_AES_256_GCM_SHA384) && Security.IsStrongTls(SslProtocols.Tls13, TlsCipherSuite.TLS_CHACHA20_POLY1305_SHA256), "TLS 1.3 AEAD suites meet the link policy");
     Check(Security.IsStrongTls(SslProtocols.Tls12, TlsCipherSuite.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384), "TLS 1.2 ECDHE + AES-GCM meets the link policy");
@@ -93,13 +98,23 @@ try
     SessionIsolationChecks.Run(Check, temporaryRoot);
     await OwnerBlockChecks.RunAsync(Check, temporaryRoot);
     await SessionAccessChecks.RunAsync(Check, temporaryRoot);
+    await InputBatchChecks.RunAsync(Check, temporaryRoot);
     await DisplayAvailabilityChecks.RunAsync(Check, temporaryRoot);
     await DiagnosticSourceChecks.RunAsync(Check, temporaryRoot);
     await DiagnosticSourceHttpChecks.RunAsync(Check, temporaryRoot);
     IdentityHealthChecks.Run(Check, Reject, temporaryRoot);
+    TailscaleStateChecks.Run(Check);
     await ParentProofChecks.RunAsync(Check, Reject);
     await RequestBodyPolicyChecks.RunAsync(Check);
+    await ErrorDisclosureChecks.RunAsync(Check);
+    RejectionAuditChecks.Run(Check, temporaryRoot);
+    await ClipboardChecks.RunAsync(Check, temporaryRoot);
+    await RemoteAdmissionChecks.RunAsync(Check, temporaryRoot);
+    await SessionChurnChecks.RunAsync(Check, temporaryRoot);
+    await ResourceLimitChecks.RunAsync(Check, temporaryRoot);
     await UploadChecks.RunAsync(Check, temporaryRoot);
+    ShortPairVectors.Run(Check);
+    await ShortPairChecks.RunAsync(Check, temporaryRoot);
     await StreamAdmissionChecks.RunAsync(Check);
     FrameQualityChecks.Run(Check, Reject);
     FrameEncodingChecks.Run(Check, Reject);
@@ -208,6 +223,7 @@ try
     info.Environment["ORBIT_CONTROL_PORT"] = controlPort.ToString(); info.Environment["ORBIT_REMOTE_PORT"] = remotePort.ToString();
     info.Environment["ORBIT_PARENT_WATCH"] = "1";
     info.Environment["ORBIT_PARENT_PROOF"] = "1";
+    info.Environment.Remove(ShortPairEndpoints.EnvironmentFlag); // The main host runs with experimental short-code pairing off.
     var diagnosticConfiguration = typeof(HostState).Assembly.GetCustomAttribute<AssemblyConfigurationAttribute>()?.Configuration == "Diagnostic";
     if (!diagnosticConfiguration) info.Environment["ORBIT_DIAGNOSTIC_SYNTHETIC"] = "1";
     var parentProofKey = Security.RandomToken();
@@ -229,6 +245,8 @@ try
     if (!diagnosticConfiguration)
         Check(!localStatus.TryGetProperty("diagnosticSource", out _) && localStatus.GetProperty("platform").GetProperty("operatingSystem").GetString() != "Windows Diagnostic",
             "Actual normal-build subprocess ignores the diagnostic opt-in and exposes no source selector/status");
+    Check(localStatus.GetProperty("transport").GetProperty("state").GetString() == "loopback-test" && localStatus.GetProperty("transport").GetProperty("mode").GetString() == "loopback-test",
+        "Host status carries the machine-readable Tailscale state next to the existing transport mode");
     Check(localStatus.GetProperty("platform").GetProperty("canLocalCursor").ValueKind is JsonValueKind.True or JsonValueKind.False,
         "Privileged host status explicitly advertises the negotiated local-cursor capability");
     using (var noBearer = new HttpClient { BaseAddress = local.BaseAddress })
@@ -258,6 +276,16 @@ try
     var fingerprint = exported.GetProperty("fingerprint").GetString()!;
     using var remote = NewRemote(controller, fingerprint, remotePort);
     Check((await remote.GetAsync("/api/info")).StatusCode == HttpStatusCode.Unauthorized, "Unpaired presented certificate cannot access remote API");
+    // H-8: a failed pairing and the unknown-certificate probe above are audited with source and reason only.
+    var guessedSecret = "generated-wrong-invite-" + Security.RandomToken();
+    Check((await remote.PostAsJsonAsync("/api/pair", new { secret = guessedSecret, deviceName = "Prober" })).StatusCode == HttpStatusCode.Forbidden,
+        "Real mTLS pairing with an unknown invite is refused");
+    var probeAudit = await local.GetFromJsonAsync<JsonElement>("/api/audit");
+    bool Audited(string kind) => probeAudit.EnumerateArray().Any(entry => entry.GetProperty("kind").GetString() == kind
+        && entry.GetProperty("detail").GetString()!.Contains("127.0.0.1", StringComparison.Ordinal));
+    Check(Audited("pair.rejected") && Audited("auth.unknown_certificate"),
+        "H-8: real mTLS failed pairing and unknown-certificate probe are audited with their source address");
+    Check(!probeAudit.GetRawText().Contains(guessedSecret, StringComparison.Ordinal), "H-8: the rejected invite value never reaches the audit");
     var inviteResponse = await local.PostAsJsonAsync("/api/invites", new { deviceName = "Integration controller", permissions = new { view = true, control = false, clipboard = false, files = false, power = false } });
     inviteResponse.EnsureSuccessStatusCode();
     var inviteJson = await inviteResponse.Content.ReadFromJsonAsync<JsonElement>();
@@ -273,6 +301,7 @@ try
         "Real mTLS platform info advertises bounded display state and explicit wake capability");
     Check(localCursorCapability == localStatus.GetProperty("platform").GetProperty("canLocalCursor").GetBoolean(),
         "Paired remote info preserves the same gated local-cursor capability as local status");
+    Check(remoteInfo.GetProperty("platform").GetProperty("canInputBatch").GetBoolean(), "Real mTLS platform info advertises the input batch body");
     if (remoteInfo.GetProperty("platform").GetProperty("canCapture").GetBoolean())
     {
         var startResponse = await remote.PostAsJsonAsync("/api/sessions", new { viewOnly = true }); startResponse.EnsureSuccessStatusCode();
@@ -289,6 +318,7 @@ try
         Check(sessionStatus.GetProperty("canLocalCursor").GetBoolean() == localCursorCapability && sessionStatus.GetProperty("resumeEpoch").GetString() == sessionJson.GetProperty("resumeEpoch").GetString(),
             "Session status retains capability negotiation and automatic-resume authorization");
         Check((await remote.PostAsJsonAsync($"/api/sessions/{sessionId}/input", new { kind = "key", key = "KeyA", isDown = true })).StatusCode == HttpStatusCode.NotFound, "View-only device cannot inject input");
+        Check((await remote.PostAsJsonAsync($"/api/sessions/{sessionId}/input", new { events = new[] { new { kind = "key", key = "KeyA", isDown = true } } })).StatusCode == HttpStatusCode.NotFound, "View-only device cannot inject a batch of input");
         Check((await remote.GetAsync($"/api/sessions/{sessionId}/clipboard")).StatusCode == HttpStatusCode.NotFound, "View-only device cannot read clipboard");
         Check((await remote.GetAsync($"/api/sessions/{sessionId}/files")).StatusCode == HttpStatusCode.NotFound, "View-only device cannot list files");
         Check((await remote.GetAsync($"/api/sessions/{sessionId}/frame?monitorId=" + new string('x', 129))).StatusCode == HttpStatusCode.BadRequest, "Oversized monitor query returns 400 before capture");
@@ -366,6 +396,9 @@ try
     Check(ownerDenied.StatusCode == HttpStatusCode.Forbidden && ownerReason.GetProperty("code").GetString() == OwnerEndedException.Code
         && ownerReason.GetProperty("error").GetString() == OwnerEndedException.UserMessage,
         "Real mTLS explicit Connect receives the exact403 owner-block contract before native capture");
+    using (var blockedInfo = await remote.GetAsync("/api/info"))
+        Check(blockedInfo.StatusCode == HttpStatusCode.Forbidden && (await blockedInfo.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString() == OwnerEndedException.Code,
+            "H-7: a blocked device cannot read /api/info and receives the typed owner-block 403");
     var peerList = await local.GetFromJsonAsync<JsonElement>("/api/peers");
     Check(peerList.EnumerateArray().Single(peer => peer.GetProperty("id").GetString() == pairedId).GetProperty("blockedByOwner").GetBoolean(),
         "Local paired-device DTO exposes persisted blockedByOwner state");
@@ -416,6 +449,62 @@ try
     using var unpairedRemote = NewRemote(otherCertificate, fingerprint, remotePort);
     unpairedRemote.DefaultRequestHeaders.Add("X-Orbit-Device-Id", pairJson.GetProperty("deviceId").GetString());
     Check((await unpairedRemote.GetAsync("/api/info")).StatusCode == HttpStatusCode.Unauthorized, "Supplying a paired device ID cannot replace actual TLS certificate authentication");
+    // H-3: the remote listener negotiates HTTP/1.1 even when a client offers HTTP/2.
+    using (var h2Client = NewRemote(controller, fingerprint, remotePort))
+    {
+        h2Client.DefaultRequestVersion = HttpVersion.Version20;
+        h2Client.DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower;
+        using var h2Response = await h2Client.GetAsync("/api/info");
+        Check(h2Response.Version == HttpVersion.Version11, "H-3: the remote listener serves HTTP/1.1 only, never HTTP/2");
+    }
+    // H-3: the global limiter runs before certificate, pin and whois work, so an unpaired flood is throttled.
+    var floodStatuses = new System.Collections.Concurrent.ConcurrentBag<HttpStatusCode>();
+    await Task.WhenAll(Enumerable.Range(0, 6).Select(async _ =>
+    {
+        for (var attempt = 0; attempt < 60; attempt++) { using var flood = await unpairedRemote.GetAsync("/api/info"); floodStatuses.Add(flood.StatusCode); }
+    }));
+    Check(floodStatuses.Contains(HttpStatusCode.TooManyRequests) && floodStatuses.Contains(HttpStatusCode.Unauthorized),
+        "H-3: requests from an unpaired certificate are rate-limited before authentication");
+    await Task.Delay(2000); // 127.0.0.1 shares one token bucket with the local checks below; let it refill.
+    // H-3: connections beyond the per-source budget are closed before any TLS handshake.
+    var heldSockets = new List<TcpClient>();
+    try
+    {
+        for (var opened = 0; opened < ConnectionBudget.RemotePerSource + 4; opened++)
+        {
+            var socket = new TcpClient(); heldSockets.Add(socket);
+            await socket.ConnectAsync(IPAddress.Loopback, remotePort);
+        }
+        var closedByHost = await Task.WhenAll(heldSockets.Select(async socket =>
+        {
+            using var wait = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            try { return await socket.GetStream().ReadAsync(new byte[1], wait.Token) == 0; }
+            catch (OperationCanceledException) { return false; }
+            catch (IOException) { return true; }
+        }));
+        Check(closedByHost.Count(closed => closed) >= 4 && closedByHost.Count(closed => !closed) <= ConnectionBudget.RemotePerSource,
+            "H-3: one source cannot hold more raw connections than its budget; excess sockets close before TLS");
+    }
+    finally { foreach (var socket in heldSockets) socket.Dispose(); }
+    await Task.Delay(500);
+    Check((await remote.GetAsync("/api/info")).IsSuccessStatusCode, "H-3: closed connections release their budget for the paired device");
+    // No server-wide connection cap: a local process holding many loopback sockets cannot lock the desktop out.
+    var localSockets = new List<TcpClient>();
+    try
+    {
+        for (var opened = 0; opened < 140; opened++)
+        {
+            var socket = new TcpClient(); localSockets.Add(socket);
+            await socket.ConnectAsync(IPAddress.Loopback, controlPort);
+        }
+        using var freshLocal = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{controlPort}"), Timeout = TimeSpan.FromSeconds(5) };
+        freshLocal.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var reachable = false;
+        try { reachable = (await freshLocal.GetAsync("/api/peers")).IsSuccessStatusCode; } catch (HttpRequestException) { }
+        Check(reachable, "The local control listener stays reachable while 140 other loopback sockets are open");
+    }
+    finally { foreach (var socket in localSockets) socket.Dispose(); }
+    await ShortPairChecks.FlagOffAsync(Check, local, remote, unpairedRemote);
     Check((await local.DeleteAsync("/api/peers/" + pairJson.GetProperty("deviceId").GetString())).IsSuccessStatusCode, "Local device revocation succeeds");
     Check((await local.PostAsync("/api/peers/" + pairedId + "/allow", null)).StatusCode == HttpStatusCode.NotFound,
         "Allow again cannot revive a revoked device through the real local API");
@@ -430,6 +519,10 @@ try
     var noCertDenied = false;
     try { noCertDenied = !(await noCertificate.GetAsync("/api/info")).IsSuccessStatusCode; } catch (HttpRequestException) { noCertDenied = true; }
     Check(noCertDenied, "Remote listener rejects clients without a TLS certificate");
+    var refusedAudit = await local.GetFromJsonAsync<JsonElement>("/api/audit");
+    Check(refusedAudit.EnumerateArray().Any(entry => entry.GetProperty("kind").GetString() == "auth.certificate_refused"
+        && entry.GetProperty("detail").GetString()!.Contains("127.0.0.1", StringComparison.Ordinal)),
+        "H-8: connections refused at TLS (no usable client certificate) are audited with their source");
     host.StandardInput.Close();
     using var parentExitTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
     await host.WaitForExitAsync(parentExitTimeout.Token);

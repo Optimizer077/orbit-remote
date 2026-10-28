@@ -6,7 +6,7 @@ Orbit is an evaluation preview. Native Apple silicon execution, DMG installation
 
 - Git, available through Apple's Command Line Tools. If `git --version` prompts for the tools, complete that installation.
 - [Node.js 24 LTS and npm](https://nodejs.org/en/download). Use the Arm64 build on Apple silicon and x64 on Intel.
-- [.NET 10 SDK](https://learn.microsoft.com/en-us/dotnet/core/install/macos), matching the SDK policy in [`global.json`](../global.json). Install the SDK, not only the runtime. The repository requests 10.0.200 and permits later .NET 10 feature bands; `dotnet --version` from the repository must succeed.
+- [.NET 10 SDK](https://learn.microsoft.com/en-us/dotnet/core/install/macos), matching the SDK policy in [`global.json`](../global.json). Install the SDK, not only the runtime. The repository requests at least 10.0.403 and permits later .NET 10 feature bands; `dotnet --version` from the repository must succeed. That SDK carries the 10.0.14 runtime (security release of 2026-10-25), which self-contained release builds bundle into the app.
 - [Tailscale for macOS](https://tailscale.com/docs/install/mac), installed and signed in. Both computers must be authorized in the same tailnet or have explicitly shared device access allowed by its policy.
 
 Use a native terminal session on Apple silicon. Check `uname -m`, `node -p process.arch`, and `dotnet --info`; avoid mixing an Arm64 shell with x64 development tools under Rosetta unless you are deliberately testing that configuration. Do not copy `node_modules` from Windows: `npm ci` installs the platform-specific dependencies.
@@ -109,6 +109,8 @@ ORBIT_MAC_TEST_CONTROL=1 \
 ```
 
 The control check clicks and types only in temporary test windows on the available displays, checks Shift/release behavior, restores the clipboard and cursor, and shuts down its host. It also tests crash recovery and deliberate host-stop enforcement. It does not save desktop images, clipboard data, invitations, or private identities to test artifacts. The Windows smoke test remains separate in `desktop.spec.ts`.
+
+On a source build with S3 input batching, add `ORBIT_MAC_TEST_BATCH=1` alongside `ORBIT_MAC_TEST_CONTROL=1` to check a queued 22-event synthetic keyboard burst on each display. It requires actual batched requests, one request in flight, and correct text/modifier order in the owned test windows. Its wire probe retains only counts. Older hosts without batching should use the ordinary control check.
 
 When macOS reports a locked desktop, the interactive Electron tests explicitly skip. A separate test checks that capture, input and clipboard capabilities are disabled, monitor details are absent, and both view-only and control session creation are refused. It never locks or unlocks the Mac or performs input, capture or clipboard operations. A locked-desktop pass does not establish interactive access; `--expect-interactive` still fails until a local user unlocks the desktop.
 

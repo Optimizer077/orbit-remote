@@ -351,6 +351,8 @@ internal sealed class VideoStreamRun : IAsyncDisposable
         catch (OperationCanceledException) when (linked.IsCancellationRequested) { }
         catch (Exception ex) when (ex is PlatformUnavailableException or InvalidOperationException or ArgumentException or IOException or TimeoutException)
         {
+            if (ex is PlatformUnavailableException { Detail: { Length: > 0 } detail } platformFailure)
+                log?.Invoke($"Stream platform failure ({platformFailure.Code}): {(detail.Length > 1024 ? detail[..1024] : detail).ReplaceLineEndings(" ")}");
             if (!connection.IsCancellationRequested)
                 _ = ex is PlatformUnavailableException { Code: DisplayAvailability.AsleepCode }
                     ? EndAsync(DisplayAvailability.AsleepCode, DisplayAvailability.AsleepMessage)

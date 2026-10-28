@@ -1,10 +1,10 @@
-using System.Collections.Concurrent;
 using System.Net;
 using System.Security.Authentication;
 using System.Text.Json;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Connections.Features;
 using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.AspNetCore.Server.Kestrel.Https;
 using Orbit.Host;
 using Orbit.Host.Platform;
@@ -40,11 +40,17 @@ await using var platform = PlatformBackendFactory.Create();
 var startedAt = DateTimeOffset.UtcNow;
 var remoteAddress = network.Address is null || identity.Health.Expired ? null : $"https://{network.Address}:{remotePort}";
 var identityRotationPending = 0;
-var remoteIdentityCache = new ConcurrentDictionary<string, DateTimeOffset>();
+var rejections = new RejectionAudit(state);
+const string TlsAccepted = "orbit.tls-accepted";
+const string CertificateRefused ="A connection presented no usable client certificate or did not complete TLS under Orbit's link policy.";
+var remoteSources = new RemoteSourceVerifier(network.VerifyRemoteAsync,
+    rejected: source => rejections.Record("auth.source_rejected", source, "Tailscale did not verify the source address."));
 var captureGate = new SemaphoreSlim(1, 1);
 var inputGate = new SemaphoreSlim(1, 1);
 var inputLeases = new InputLeases();
 var frameWaits = new FrameWaitGate();
+// EXPERIMENTAL F33 short-code pairing is inert unless explicitly enabled for this host process.
+var shortPairing = ShortPairEndpoints.IsEnabled(Environment.GetEnvironmentVariable(ShortPairEndpoints.EnvironmentFlag)) ? new ShortPairHost(state, () => identity.Fingerprint) : null;
 
 var builder = WebApplication.CreateBuilder(args.Where(a => a != "--loopback-test").ToArray());
 HostShutdown.Add(builder.Services);
@@ -57,10 +63,36 @@ builder.WebHost.ConfigureKestrel(options =>
     options.Limits.MaxRequestBodySize = maxTransferBytes;
     options.Limits.RequestHeadersTimeout = TimeSpan.FromSeconds(10);
     options.Limits.KeepAliveTimeout = TimeSpan.FromSeconds(30);
+    // No server-wide connection limit: it would also cap the loopback control listener,
+    // so a local process holding sockets could lock the desktop out of its own host.
+    // The remote listener has its own admission budget below; the local one has none.
+    var remoteConnections = new ConnectionBudget(refused: (source, count) => linkLogger.LogWarning(
+        "Refused {Count} remote connection(s) over the connection budget ({Total} total, {PerSource} per source) in the last 30 seconds; latest from {Source}.",
+        count, ConnectionBudget.RemoteTotal, ConnectionBudget.RemotePerSource, source));
     options.Listen(IPAddress.Loopback, controlPort);
     if (remoteAddress is not null)
         options.Listen(IPAddress.Parse(network.Address!), remotePort, listener =>
         {
+            // HTTP/1.1 only: every Orbit client (the Electron viewer's Node https agent and
+            // .NET HttpClient) speaks HTTP/1.1 and no route needs HTTP/2. Without HTTP/2 one
+            // connection carries one request at a time, so the connection budget below also
+            // bounds concurrent requests, and HPACK/stream-multiplexing parsing is not exposed.
+            listener.Protocols = HttpProtocols.Http1;
+            // Registered before UseHttps, so it runs before the TLS handshake.
+            listener.Use(next => async connection =>
+            {
+                var source = (connection.RemoteEndPoint as IPEndPoint)?.Address.ToString() ?? "unknown";
+                if (!remoteConnections.TryEnter(source)) { connection.Abort(); return; }
+                try
+                {
+                    await next(connection);
+                    // The post-handshake check below marks connections that passed TLS. Any
+                    // other ended connection was refused at TLS (no usable certificate, weak
+                    // link) or abandoned during the handshake (H-8).
+                    if (!connection.Items.ContainsKey(TlsAccepted)) rejections.Record("auth.certificate_refused", source, CertificateRefused);
+                }
+                finally { remoteConnections.Exit(source); }
+            });
             listener.UseHttps(new HttpsConnectionAdapterOptions
             {
                 ServerCertificate = identity.Certificate,
@@ -85,6 +117,7 @@ builder.WebHost.ConfigureKestrel(options =>
                         linkLogger.LogWarning("Rejected TLS link below policy: {Protocol}, {CipherSuite}, {RemoteEndpoint}. Further warnings suppressed for 30 seconds.", tls?.Protocol, tls?.NegotiatedCipherSuite, connection.RemoteEndPoint);
                     connection.Abort(); return;
                 }
+                connection.Items[TlsAccepted] = true;
                 await next(connection);
             });
         });
@@ -92,11 +125,13 @@ builder.WebHost.ConfigureKestrel(options =>
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.AddPolicy(ShortPairEndpoints.RateLimitPolicy, context => RateLimitPartition.GetFixedWindowLimiter(context.Connection.RemoteIpAddress?.ToString() ?? "unknown", _ => new FixedWindowRateLimiterOptions { PermitLimit = 15, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
     options.AddPolicy("pairing", context => RateLimitPartition.GetFixedWindowLimiter(context.Connection.RemoteIpAddress?.ToString() ?? "unknown", _ => new FixedWindowRateLimiterOptions { PermitLimit = 6, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
     options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context => RateLimitPartition.GetTokenBucketLimiter(context.Connection.RemoteIpAddress?.ToString() ?? "unknown", _ => new TokenBucketRateLimiterOptions { TokenLimit = 160, TokensPerPeriod = 120, ReplenishmentPeriod = TimeSpan.FromSeconds(1), AutoReplenishment = true, QueueLimit = 0 }));
 });
 var app = builder.Build();
 var shutdown = app.Services.GetRequiredService<HostShutdown>();
+state.AuditWriteFailed = message => app.Logger.LogWarning("{AuditFailure}", message);
 var uploads = new UploadStore(state, UploadMetadata.Create(app.Logger),
     () => app.Logger.LogWarning("An upload staging file could not be removed; a later startup will retry stale staging cleanup."));
 var cleanupWarning = 0;
@@ -139,7 +174,7 @@ RemoteSession? Session(HttpContext context, string id, Func<DevicePermissions, b
 async Task<PlatformStatus> PlatformInfo(CancellationToken cancellationToken)
 {
     var status = await platform.GetStatusAsync(cancellationToken);
-    return status with { CanLocalCursor = status.CanCapture && VideoStreamEndpoints.CanLocalCursor(platform) };
+    return status with { CanLocalCursor = status.CanCapture && VideoStreamEndpoints.CanLocalCursor(platform), CanInputBatch = true };
 }
 object SessionInfo(RemoteSession session) => new
 {
@@ -159,6 +194,13 @@ app.Use(async (context, next) =>
     { context.Response.StatusCode = 403; await context.Response.WriteAsJsonAsync(new { error = "Browser requests are not accepted. Use the Orbit desktop application." }); return; }
     var requestSize = context.Features.Get<IHttpMaxRequestBodySizeFeature>();
     if (requestSize is { IsReadOnly: false }) requestSize.MaxRequestBodySize = RequestBodyPolicy.LimitFor(context.Request.Method, context.Request.Path, maxTransferBytes);
+    await next(context);
+});
+// Rate limits run before authentication, so rejected and unauthenticated requests are
+// counted too and cannot drive unbounded certificate, pin or whois work.
+app.UseRateLimiter();
+app.Use(async (context, next) =>
+{
     if (IsLocal(context))
     {
         if (!IPAddress.IsLoopback(context.Connection.RemoteIpAddress ?? IPAddress.None) || context.Request.Host.Host != "127.0.0.1") { context.Response.StatusCode = 403; return; }
@@ -173,24 +215,26 @@ app.Use(async (context, next) =>
         if (identity.Health.Expired || Volatile.Read(ref identityRotationPending) != 0) { context.Response.StatusCode = 503; return; }
         if (!context.Request.IsHttps) { context.Response.StatusCode = 403; return; }
         var certificate = await context.Connection.GetClientCertificateAsync(context.RequestAborted);
-        if (!Security.IsClientCertificateUsable(certificate)) { context.Response.StatusCode = 401; return; }
         var source = context.Connection.RemoteIpAddress?.ToString() ?? "";
-        if (!remoteIdentityCache.TryGetValue(source, out var verifiedUntil) || verifiedUntil <= DateTimeOffset.UtcNow)
+        if (!Security.IsClientCertificateUsable(certificate))
         {
-            if (!await network.VerifyRemoteAsync(context.Connection.RemoteIpAddress, context.RequestAborted)) { context.Response.StatusCode = 403; return; }
-            if (remoteIdentityCache.Count > 1024) remoteIdentityCache.Clear();
-            remoteIdentityCache[source] = DateTimeOffset.UtcNow.AddSeconds(10);
+            rejections.Record("auth.certificate_refused", source, CertificateRefused);
+            context.Response.StatusCode = 401; return;
         }
-        if (context.Request.Path != "/api/pair")
+        if (!await remoteSources.IsVerifiedAsync(context.Connection.RemoteIpAddress, context.RequestAborted)) { context.Response.StatusCode = 403; return; }
+        if (context.Request.Path != "/api/pair" && !(shortPairing is not null && ShortPairEndpoints.IsBootstrapPath(context.Request.Path)))
         {
             var peer = state.FindDevice(Security.Fingerprint(certificate!));
-            if (peer is null) { context.Response.StatusCode = 401; return; }
+            if (peer is null)
+            {
+                rejections.Record("auth.unknown_certificate", source, "A request presented a certificate that is not paired or was revoked.");
+                context.Response.StatusCode = 401; return;
+            }
             context.Items["peer"] = peer;
         }
     }
     await SessionAccess.InvokeWithErrorsAsync(context, next, app.Logger);
 });
-app.UseRateLimiter();
 
 app.MapGet("/api/parent-proof", (HttpContext context) =>
 {
@@ -205,11 +249,16 @@ app.MapGet("/api/parent-proof", (HttpContext context) =>
 app.MapGet("/api/status", async (HttpContext context) =>
 {
     if (!IsLocal(context)) return Results.NotFound();
-    return Results.Ok(new { state.HostId, state.HostName, version = "0.1.0", startedAt,
+    var status = new { state.HostId, state.HostName, version = "0.1.0", startedAt,
 #if ORBIT_DIAGNOSTICS
         diagnosticSource = DiagnosticSource.Status(platform),
 #endif
-        remoteEnabled = remoteAddress is not null && !identity.Health.Expired && Volatile.Read(ref identityRotationPending) == 0, remoteAddress, certificateFingerprint = identity.Fingerprint, identity = identity.Health, transport = network, platform = await PlatformInfo(context.RequestAborted), settings = state.Settings, pairedDevices = state.Devices, sessions = state.Sessions });
+        remoteEnabled = remoteAddress is not null && !identity.Health.Expired && Volatile.Read(ref identityRotationPending) == 0, remoteAddress, certificateFingerprint = identity.Fingerprint, identity = identity.Health, transport = network, platform = await PlatformInfo(context.RequestAborted), settings = state.Settings, pairedDevices = state.Devices, sessions = state.Sessions };
+    if (shortPairing is null) return Results.Ok(status);
+    // Advertised only when the experimental flag is on; otherwise the field is absent.
+    var advertised = JsonSerializer.SerializeToNode(status, JsonSerializerOptions.Web)!.AsObject();
+    advertised["experimentalShortCode"] = true;
+    return Results.Ok(advertised);
 });
 app.MapGet("/api/peers", (HttpContext context) => LocalOnly(context, () => Results.Ok(state.Devices)));
 app.MapGet("/api/tailnet-peers", (HttpContext context) => LocalOnly(context, () => Results.Ok(network.Peers)));
@@ -226,6 +275,7 @@ app.MapPost("/api/identity/rotate", async (HttpContext context, IdentityRotation
     if (Interlocked.CompareExchange(ref identityRotationPending, 1, 0) != 0) return Results.Conflict(new { error = "Identity recovery is already in progress." });
     try
     {
+        shortPairing?.Cancel();
         state.EndAllSessions(explicitHostStop: false);
         await inputGate.WaitAsync(context.RequestAborted);
         try { await platform.ReleaseInputsAsync(context.RequestAborted); inputLeases.Clear(); } finally { inputGate.Release(); }
@@ -271,12 +321,26 @@ app.MapPost("/api/pair", async (HttpContext context, PairRequest request) =>
 {
     if (IsLocal(context)) return Results.NotFound();
     var certificate = await context.Connection.GetClientCertificateAsync(context.RequestAborted);
-    var device = state.Pair(request, Security.Fingerprint(certificate!));
+    PairedDevice device;
+    try { device = state.Pair(request, Security.Fingerprint(certificate!)); }
+    catch (Exception ex) when (ex is UnauthorizedAccessException or ArgumentException)
+    {
+        // Record only the source and a fixed reason; the request carries the invite secret.
+        rejections.Record("pair.rejected", context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            ex is UnauthorizedAccessException ? "Pairing refused: the invite expired, was already used, or is invalid." : "Pairing refused: the request was malformed.");
+        throw;
+    }
     return Results.Ok(new { deviceId = device.Id, deviceName = device.Name, hostId = state.HostId, hostName = state.HostName, device.Permissions, certificateFingerprint = identity.Fingerprint });
 }).RequireRateLimiting("pairing");
-app.MapGet("/api/info", async (HttpContext context) => Peer(context) is { } peer ? Results.Ok(new { state.HostId, state.HostName, platform = await PlatformInfo(context.RequestAborted), permissions = peer.Permissions, settings = new { state.Settings.AllowRemotePower, state.Settings.FileTransferEnabled } }) : Results.NotFound());
+if (shortPairing is not null)
+    app.MapShortPairing(shortPairing, state, identity, IsLocal,
+        () => remoteAddress is null || identity.Health.Expired || Volatile.Read(ref identityRotationPending) != 0,
+        () => identity.Health.Expired || Volatile.Read(ref identityRotationPending) != 0, network.Mode == "loopback-test");
+// Re-read the current pairing decision: a blocked device gets the typed 403, as on every session route.
+app.MapGet("/api/info", async (HttpContext context) => SessionAccess.CurrentPeer(state, Peer(context)) is { } peer ? Results.Ok(new { state.HostId, state.HostName, platform = await PlatformInfo(context.RequestAborted), permissions = peer.Permissions, settings = new { state.Settings.AllowRemotePower, state.Settings.FileTransferEnabled } }) : Results.NotFound());
 app.MapSessions(state, platform, Peer, (context, id) => Session(context, id, p => p.View, allowStopping: true), SessionInfo,
-    () => identity.Health.Expired || Volatile.Read(ref identityRotationPending) != 0, inputGate, inputLeases, shutdown);
+    () => identity.Health.Expired || Volatile.Read(ref identityRotationPending) != 0, inputGate, inputLeases, shutdown,
+    SessionEndpoints.CreateLimiter());
 app.MapDelete("/api/sessions/{id}", async (HttpContext context, string id) =>
 {
     var deviceId = IsLocal(context) ? null : Peer(context)?.Id;
@@ -299,25 +363,7 @@ app.MapPost("/api/sessions/{id}/release-inputs", async (HttpContext context, str
     await inputGate.WaitAsync(context.RequestAborted);
     try { await platform.ReleaseInputsAsync(context.RequestAborted); inputLeases.Clear(); return Results.NoContent(); } finally { inputGate.Release(); }
 });
-app.MapGet("/api/sessions/{id}/clipboard", async (HttpContext context, string id) =>
-{
-    if (Session(context, id, p => p.Clipboard) is null) return Results.NotFound();
-    var text = await platform.ReadClipboardAsync(context.RequestAborted);
-    if (Session(context, id, p => p.Clipboard) is null) return Results.NotFound();
-    return Results.Ok(new { text });
-});
-app.MapPut("/api/sessions/{id}/clipboard", async (HttpContext context, string id, ClipboardRequest request) =>
-{
-    if (Session(context, id, p => p.Clipboard) is null) return Results.NotFound();
-    if (request.Text is null || request.Text.Length > 8192) return Results.BadRequest(new { error = "Clipboard text is limited to 8,192 characters." });
-    await inputGate.WaitAsync(context.RequestAborted);
-    try
-    {
-        if (Session(context, id, p => p.Clipboard) is null) return Results.NotFound();
-        await platform.WriteClipboardAsync(request.Text, context.RequestAborted); return Results.NoContent();
-    }
-    finally { inputGate.Release(); }
-});
+app.MapClipboard(state, platform, (context, id) => Session(context, id, p => p.Clipboard), inputGate, ClipboardEndpoints.CreateLimiter());
 app.MapPost("/api/sessions/{id}/power", async (HttpContext context, string id, PowerRequest request) =>
 {
     // Denied requests must not queue behind or delay another device's input.

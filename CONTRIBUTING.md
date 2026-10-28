@@ -62,6 +62,6 @@ For interface work, follow [BRAND.md](docs/BRAND.md), preserve all three themes,
 
 ## Report security concerns privately
 
-Contact the repository owner privately for a suspected vulnerability. No dedicated reporting address is configured. If GitHub offers **Report a vulnerability** for this repository, use that private route; otherwise arrange a private channel with the owner before sending technical details.
+Report a suspected vulnerability privately through the public repository's **Security** tab, **Report a vulnerability** ([report a vulnerability](https://github.com/Optimizer077/orbit-remote/security/advisories/new)). Please do not open a public issue with details.
 
 Do not publish a vulnerability, exploit, live invitation, private key, or affected user information in an issue, pull request, screenshot, or public discussion. An initial private report should describe the affected version, boundary involved, impact, and a minimal sanitized reproduction. Follow [SECURITY.md](SECURITY.md) for the project's current scope and limitations.

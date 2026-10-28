@@ -1,10 +1,8 @@
 # Orbit Remote: experiments, results and decisions
 
-This page records what was tested during the development of the hardware video stream and the related security work on 26 and 27 October 2026: the measured results, the runs that failed or stopped early, the approaches that were rejected, and the decisions that followed. Failed and incomplete runs are listed next to the passing ones. A later pass does not replace an earlier failure.
+This page records what was tested during the development of the hardware video stream and the related security work from 26 to 28 October 2026: the measured results, the runs that failed or stopped early, the approaches that were rejected, and the decisions that followed. Failed and incomplete runs are listed next to the passing ones. A later pass does not replace an earlier failure.
 
 Short summaries of the headline numbers are in [PERFORMANCE.md](PERFORMANCE.md) and [VALIDATION.md](VALIDATION.md). This page has the detail behind them.
-
-**Development evidence versus release contents.** This log includes experiments and development changes that postdate the preview.5 source baseline. A change marked merged below is not automatically part of that public snapshot. Software-decoder retry, the newer viewer timing panel, input batching, and the unfinished bitrate controller are outside preview.5. Release contents and the final release checks are stated in the changelog and release notes.
 
 ## Contents
 
@@ -15,14 +13,18 @@ Short summaries of the headline numbers are in [PERFORMANCE.md](PERFORMANCE.md) 
    - [Live desktop stream](#live-desktop-stream)
    - [Synthetic full-pipeline runs](#synthetic-full-pipeline-runs)
    - [Two viewers](#two-viewers)
+   - [Viewer presentation bench](#viewer-presentation-bench)
    - [Recovery times](#recovery-times)
    - [Encoder bitrate on hard-to-compress content](#encoder-bitrate-on-hard-to-compress-content)
+   - [Bitrate safety net: native component results](#bitrate-safety-net-native-component-results)
    - [Network impairment profiles](#network-impairment-profiles)
    - [Windows on ARM](#windows-on-arm)
    - [Mac decoding](#mac-decoding)
    - [Input path](#input-path)
    - [Image path (fallback)](#image-path-fallback)
    - [Cross-device runs](#cross-device-runs)
+   - [Test-suite stability](#test-suite-stability)
+   - [Contrast and colour vision in the Daylight and Graphite themes](#contrast-and-colour-vision-in-the-daylight-and-graphite-themes)
 4. [Experiments that failed or were rejected](#experiments-that-failed-or-were-rejected)
 5. [Decision log](#decision-log)
 6. [Security reviews](#security-reviews)
@@ -46,13 +48,13 @@ Live-desktop runs use the real app on a real screen. Their content was not contr
 
 **Clocks.** Intervals are measured on one clock. Times are never subtracted across two computers. "Drawn" means the viewer's canvas draw completed; it is not light leaving the panel, so none of these numbers is a click-to-screen latency.
 
-**Privacy.** Stream measurements retained counts, sizes and timings rather than private desktop pixels or encoded video. This statement concerns stream measurements; interface tests also produce controlled app screenshots.
+**Privacy.** No screen pixels or encoded video were saved during any test; only counts, sizes and timings.
 
 ## Test hardware
 
 | Label used here | Hardware and software | Used for |
 |---|---|---|
-| Windows desktop | Windows 11 Pro x64, Intel Core Ultra desktop CPU without integrated graphics, NVIDIA RTX GPU (NVIDIA hardware H.264 encoder through Media Foundation) | Almost all stream, encoder, recovery and impairment results |
+| Windows desktop (the NVIDIA RTX 5060 Ti x64 PC) | Windows 11 Pro x64, Intel Core Ultra desktop CPU without integrated graphics, NVIDIA RTX 5060 Ti GPU (NVIDIA hardware H.264 encoder through Media Foundation) | Almost all stream, encoder, recovery and impairment results, and the bitrate safety net component runs |
 | Windows on ARM laptop | Windows on ARM, Qualcomm SoC with a Qualcomm hardware H.264 encoder | ARM host, ARM viewer and remote input results |
 | Mac | Apple M2 Pro (Apple silicon) | Decoder benchmark, Mac native checks, Mac viewer in cross-device runs |
 | Raspberry Pi 4 | Available | Not tested; the Pi host plan is paused |
@@ -130,6 +132,26 @@ Full-minute host stage timings for the low-entropy two-viewer run (7,200 samples
 
 Earlier the same day, with a 60 Hz test animation captured from the real desktop (60 s), the real app drew 59.60 and 59.68 frames per second with two windows of one app, and 59.96 and 59.79 with two separate apps, with no gap over 100 ms.
 
+### Viewer presentation bench
+
+**What changed (merged 2026-10-28, commits efe1b27..4aa23fb).** The viewer's main process now keeps up to three video records on their way to the decoder instead of one, and checks every credit the decoder returns against what it actually has in flight. Every frame is still decoded. Display draws at most two frames per display refresh: the newest decoded frame is drawn at once when nothing newer is pending, and otherwise the newest waiting frame is drawn on the next refresh. Frames that are replaced before they are drawn are released at once and counted as *replaced*, separately from dropped frames. Connection details now shows the decoder as *Hardware*, *Software* or *Not confirmed*. [PERFORMANCE.md](PERFORMANCE.md) describes the resulting pipeline.
+
+**Method.** A bench in Electron 45 encodes the generated low-entropy test pattern once with the browser's software H.264 encoder, then replays it at a fixed rate through the real stream client, decoder Worker, WebCodecs decoder and canvas. The bench runs on the internal UI lab and is not part of the public source. A stand-in for the Electron main process sends records only against decoder credit, as the app does. Two delivery modes: *paced* (each frame at its own 60 fps time) and *burst* (three frames arrive together every third interval, like clumped network reads). Runs of the old and the new code were interleaved in pairs. The measure is the time from a frame being parsed to its canvas draw.
+
+| Delivery | p95, parse to draw | Dropped frames | Result |
+|---|---|---:|---|
+| Paced, 60 fps | 1.3 ms new; 1.2–1.6 ms old | 0 | Equal within run-to-run noise |
+| Burst | new is 0.2–0.8 ms above old (gate: at most +1 ms) | 0 | Pass |
+
+In burst delivery fewer frames per second are drawn than with the old code, because a frame that is replaced before the next refresh is skipped by design. Those frames are still decoded and are counted as replaced, not dropped. The presented frame rate is not published here.
+
+Limits of this bench:
+
+- It measures to the `drawImage` call on the canvas, not to light leaving the display.
+- The hop from the Electron main process to the window is simulated by the stand-in on the page; the real inter-process copy is not in the measurement.
+- Content is generated and software-encoded; no host, screen capture or network is involved.
+- It ran on a machine shared with other work, so background load was not controlled.
+
 ### Recovery times
 
 Windows desktop, one machine, generated or live source as noted, 2026-10-27. Each row lists every measured attempt in order.
@@ -161,9 +183,32 @@ The high-entropy failure raised the question whether the encoder holds its confi
 
 Every high-entropy update was about 1.44 MB, which means the encoder sat at its QP 30 ceiling and could not compress further. The full pipeline's 247 Mbit/s above is lower than 688 Mbit/s because the viewer path slowed the stream to about 24 frames per second.
 
-Two follow-up experiments, the first bitrate safety net and a QP calibration, are described under [failures](#experiments-that-failed-or-were-rejected). The current direction is in the [decision log](#decision-log).
+Two follow-up experiments, the first bitrate safety net and a QP calibration, are described under [failures](#experiments-that-failed-or-were-rejected). The current direction is in the [decision log](#decision-log), and the first native results for it are in the next section.
 
 **Text sharpness.** On 2026-10-26 a generated text test (1920×1080, 30 fps, 4 Mbit/s, 91 frames with a card change at frame 30) measured static text at 50.6 dB PSNR within 15 frames (0.5 s) with maximum QP 30, against 46.3 dB before the change. The highest 1-second window was 0.94 times the target on text and 1.12 times on generated video. This is why QP 30 is the default.
+
+### Bitrate safety net: native component results
+
+**These are component measurements, not end-to-end viewer results.** They test the revised bitrate overshoot safety net, called C2 below (the ladder in the [decision log](#decision-log)), on the NVIDIA RTX 5060 Ti x64 PC on the evening of 27 October 2026. The runs were made in this order: high entropy, the incomplete first low-entropy attempt, the busy-machine low-entropy run, and about 30 minutes later the quiet low-entropy rerun. The host's real stream loop, GPU encoder and stream writer ran with the generated test source at 1920×1280, 60 fps configured, 8 Mbit/s target. Each frame was acknowledged immediately inside the same process. No Electron viewer, HTTP link, decoding, drawing or network was involved, and image quality was not assessed. Each run had an 8-second warm-up, then a fixed 60-second measurement window, then one requested refresh keyframe. The build was commit bc9809f on the safety-net development branch, which is not merged; it predates the GPU binding fix described under [Test-suite stability](#test-suite-stability).
+
+| Run | Encoded per second | Mean | Highest rolling 1 s | Largest keyframe, any phase | Ladder | Result |
+|---|---:|---:|---:|---:|---|---|
+| High entropy | 59.97 (3,598 in 60 s) | 7.98 Mbit/s | 8.27 Mbit/s | 1,437,460 bytes (opening keyframe at QP 30) | One step, 1.35 s after the run started: straight to QP 51 at scale 0.33 (634×422), 60 fps | Mean and peak **pass**; settling **pass**; keyframe budget **fail** |
+| Low entropy, quiet machine | 60.0 (3,600 in 60 s) | 1.08 Mbit/s | 1.14 Mbit/s | 7,950 bytes | Never stepped | **Pass** on mean, peak and keyframe budgets |
+| Low entropy, busy machine | **14.7** (882 in 60 s) | 0.22 Mbit/s | 0.43 Mbit/s | 7,649 bytes | Never stepped | Budgets met, but the encode rate is far below 60 (see below) |
+| Low entropy, first attempt | — | — | — | — | Never stepped | **Incomplete.** After 2,718 encoded frames the GPU video path failed and the stream switched to the CPU path; the runner accepts only the GPU path, so it stopped. The cause was not established |
+
+Budgets, as before: mean at most 110 % of the target, highest 1-second window at most 150 %, every keyframe at most 1 second of budget (1,000,000 bytes).
+
+**High entropy.** The first 1-second window was about 84.5 times the target, so the ladder used its jump rule and reopened the encoder once, at QP 51 and one third of the width and height, with a new keyframe of 135,953 bytes. Measured by the evaluator for this gate, the output stayed under 150 % of the target from 2 seconds after the end of the first over-budget window, which is inside the 6-second gate; no later 1-second window went over during the remaining 67 seconds. The windows are 1 second long, so this time has 1-second resolution. The ladder did not step back up, because the content stayed noisy. An independent re-evaluation from the raw per-frame numbers reproduced the settling pass and the encode rates. Compared with the first safety net ([failure 11](#experiments-that-failed-or-were-rejected)): mean 13.36 → 7.98 Mbit/s, highest window 43.82 → 8.27 Mbit/s, and first window under 150 % counted from the start of the run 13 s → 3 s.
+
+**Known limit: the opening keyframe.** The stream still opens at QP 30, and on high-entropy content the first keyframe is about 1.44 MB (1,437,460 bytes). That is over the 1,000,000-byte keyframe budget before the ladder can react, so the keyframe gate counted over all phases still fails on high entropy. This is reported as a known limit, as agreed in the gate revision; it is not fixed.
+
+**Low entropy, quiet machine.** The result matches the encoder-only baseline above (59.98 per second, 1.079 Mbit/s mean, 1.139 Mbit/s peak): 60.0 per second, 1.079 Mbit/s mean and 1.140 Mbit/s rolling peak. Frame sizes p50 2,179, p95 2,997 and maximum 7,950 bytes. No measurement samples were dropped. Keyframes: the opening keyframe (6,170 bytes), one keyframe inside the measurement window (7,950 bytes) and the requested refresh (7,730 bytes). The one in the window is the encoder's 3,601st frame, 7.7 s before the requested refresh, which matches the configured periodic keyframe interval of 3,600 frames. The high-entropy run's keyframe inside the window also falls on its second encoder's 3,601st frame.
+
+**Low entropy, busy machine.** An earlier low-entropy run, recorded while the PC was busy with other work, encoded only 14.7 frames per second; opening its encoder also took about 0.98 s against 0.25 s in the quiet run. The rerun on a quiet machine reached 60.0, so the slow rate is attributed to machine load. This is an association between two runs; the load was not measured and the cause was not isolated.
+
+**Status.** C2 (the safety net) is **not merged**. Stage 2 above covers only the encoder and stream loop. Stages 3 and 4 add the checks still missing: low-entropy image quality (PSNR) against the build before the safety net, sharp text again within 1 second after a burst of noise, and report-only bursty scrolling and bursty noise. Their runners are under independent review and have not run on hardware yet. That review has so far found five ways the evaluator could report a pass on incomplete or contradictory data (a partly decoded run, unpaired frames, contradictory geometry, a ladder active only during warm-up, and an incomplete supervisor receipt). The reviewer confirmed the fixes for the first four; the fix for the fifth, with a test that fails on the old code, is awaiting review. No native run is approved until that review passes.
 
 ### Network impairment profiles
 
@@ -293,13 +338,46 @@ Every attempt between two computers, in order, including those that stopped earl
 | 2026-10-27 | Windows desktop generated video → Mac viewer, attempt 1 | **Failed handoff.** The Mac side never launched; no frames | Manual coordination missed |
 | 2026-10-27 | Same, attempt 2 | **Incomplete.** The Mac received video over TLS 1.3 and drew five frames at 1920×1280. The Windows host then stopped because its CPU-readback counter reached three; the cause of those readbacks is unknown. The 30-second measurement and end check did not run | Unexplained CPU readbacks |
 | 2026-10-27 | Same, attempt 3 (automated handoff) | **Incomplete.** Seven frames drawn on the Mac over TLS 1.3, AES-256-GCM, X25519; the Windows host showed zero CPU readbacks. The run stopped at a pre-measurement check that wrongly counted a metadata field as an extra permission. This was a test defect; no product permission check changed | Test defect |
-| 2026-10-27 | Same, attempt 4 | **Aborted before pairing.** The Mac watcher timed out a Git fetch and published an abort before the Windows controller bootstrapped. Windows read the abort after starting, then stopped within 22.3 s. No accepted peer connection, frames or measurement; both sides reported cleanup complete | Coordination-read timeout and a pre-bootstrap terminal-state race in the harness |
+| 2026-10-27 | Same, attempt 4 | **Aborted before the host was ready**; the Windows side stopped itself after 22 s | Startup race in the test harness, under diagnosis |
 
 Sustained video between two unlocked computers has therefore **not** been measured yet.
 
+### Test-suite stability
+
+Repeated runs of the automated suites, 27–28 October 2026. "Lab" is the browser-based UI test suite.
+
+| Run | Repeats | Result per repeat | Failures or flakes |
+|---|---:|---|---|
+| Flaky-test search, desktop unit suite (main, 27 October) | 25 | 622 / 622 | 0 |
+| Flaky-test search, lab suite | 3 | 380 / 380 | 0 |
+| Regression sweep, desktop unit suite (main at 62dda7b, 28 October) | 5 | 660 / 660; type check and build clean | 0 |
+| Regression sweep, full lab suite (15 files) | 2 | 410 / 410 | 0 |
+| Regression sweep, host suite | 3 | 1,365 / 1,365 | 0 |
+
+The flaky-test search found no flake, but it noted the tightest timing margins. One heads-up-display test slept 2,150 ms against a 2,000 ms hide timer and 500 ms against a 400 ms reveal delay, so under load either margin could vanish. It now waits for the state with a bounded timeout instead of a fixed sleep (e976328). In the regression sweep, the README screenshots regenerated from test fixtures were byte-identical (13 of 13).
+
+**Exit code 139 investigation.** An earlier run of the host test executable was reported to end with exit code 139, a crash. Findings:
+
+- The Windows event log has one access violation for that executable in the previous 30 days, at 22:09 on 27 October 2026. The event does not record which copy of the executable crashed. It did not coincide with a C2 component runner run: every runner run had written its result by 22:07. Other test-suite runs were active on the machine at that time, so the crashing process is not identified.
+- The crash did not repeat: 38 suite processes (12 routine Debug suite runs in a row and 26 native-only stress processes) completed, the stress processes running 251 rounds, with no crash.
+- A code read found a real use-after-free race in the GPU path. The capture code handed the D3D11 device, its immediate context and the Media Foundation device manager to a GPU encoder that was being opened without holding a reference. A capture recovery or shutdown in that window could free the device under the encoder. Fixed in 290a1f2 and ada12e3: the binding now takes the references under the capture's lock and holds them until the encoder has its own, a failed encoder open releases everything it took, and an open that loses the race to a capture recovery returns a capture-reset result at once. A separate stress check (not part of the routine suite) ran 3 rounds on the NVIDIA GPU, with 14–16 encoder opens per round raced against forced capture recoveries; the device manager's reference count was 2 before and 2 after, and bound pointers stayed valid through forced recoveries. Host suite 1,365 / 1,365 after the fix.
+- This race is a plausible cause, because a GPU stall under load takes exactly that recovery path. It is not proven: the crashing process is not identified, and the crash was not reproduced before or after the fix.
+
+### Contrast and colour vision in the Daylight and Graphite themes
+
+The Daylight and Graphite themes were made bolder on 28 October 2026 (b5d5612): a solid deep-navy sidebar, a vivid teal accent, solid primary buttons and solid green, amber and red status chips. A check ([theme-contrast.cjs](../apps/desktop/tests/theme-contrast.cjs)) reads the colour tokens of both themes from the stylesheet. It runs as part of the desktop unit suite since 0d495de.
+
+| Check | Rule | Result |
+|---|---|---|
+| Contrast, text | WCAG 2.2 AA 1.4.3: at least 4.5:1 | 108 of 108 pairs pass (54 per theme). Lowest: 4.54:1 in Daylight (`--accent-ink` on `--accent`), 4.94:1 in Graphite (`--danger-ink` on `--danger`) |
+| Contrast, UI components and focus indicators | WCAG 2.2 AA 1.4.11: at least 3:1 | 28 of 28 pairs pass (14 per theme). Lowest: 3.35:1 in Daylight (`--line-strong` on `--bg`), 3.33:1 in Graphite (`--toggle-track` on `--surface`) |
+| Colour-blind separation of status colours | CIEDE2000 colour difference at least 10 between success, warning and danger, simulated for protanopia and deuteranopia (Machado et al. 2009, full severity) | 12 of 12 status pairs pass. Minimum 10.1: Graphite, success against warning, under protanopia. Tritanopia is also computed and reported but is not gated; its lowest value is 18.4 |
+
+In total, 136 token pairs pass WCAG AA. Limits: the check computes contrast from token values, not from rendered pixels, so text drawn over images or blended colours is not covered. The colour-vision result is a simulation. Status is also shown with an icon and a text label, so colour is not the only signal. The other three themes (Midnight, Paper and Ember) were not changed and are not covered by this check.
+
 ## Experiments that failed or were rejected
 
-Each entry gives what was tried, the numbers, and what was learned. Dates are 2026-10-26 or 2026-10-27.
+Each entry gives what was tried, the numbers, and what was learned. Dates are from 26 to 28 October 2026.
 
 1. **First live video run: 7.3 frames per second (2026-10-26).** A fixed host cost of about 137 ms per frame. Timing showed each of three session checks took 23–25 ms, because each created a new process object to read the session ID (9.6 ms each, twice per call), and the checks ran repeatedly per capture. Removing the repeated lookups gave 38.6 frames per second; fixing the stream loop's pacing (absolute-tick pacing and a high-resolution timer) gave 59.3. Learned: profile the host per stage before blaming the encoder or network.
 
@@ -357,20 +435,13 @@ Each entry gives what was tried, the numbers, and what was learned. Dates are 20
 
 18. **Real-desktop capture checks failing on the build machine.** Five of five real-capture checks failed with no first frame within 5 s while the session was unlocked. A read-only check showed the display was off. This led to the release-verification decision below.
 
-19. **Windows integration fixture updates (2026-10-27).** These were development-app tests, not packaged-app tests. Runtime product code stayed unchanged. Earlier failures were retained:
+19. **The first newest-frame presentation held a burst's last frame (2026-10-28).** In the [viewer bench](#viewer-presentation-bench), the first version raised the burst p95 to 6.4–6.7 ms, against 1.8–2.5 ms for the old code. When a burst's decoded frames straddled a display refresh, the refresh-time draw of an earlier, not newest, frame used up that refresh's single draw, so the burst's last frame waited one more refresh. Fixed in ce0feb7: only immediate draws count against the per-refresh cap, so a refresh draws at most one waiting frame plus at most one newest frame. Burst p95 is now within 1 ms of the old code.
 
-    | Attempt | Outcome | What the evidence established |
-    |---|---|---|
-    | Command configuration | Failed before app launch | The wrapper passed literal quotes around its configuration filename |
-    | Hidden-window mode | Failed after 89.74 s | Delivery was correctly paused for a hidden native window; this mode could not satisfy a live-stream assertion |
-    | Original visible fixture | Failed after 15.67 s | The fresh-screen gate denied input before the older expected View-only denial |
-    | First correction | Failed after 19.96 s | The popout probe lacked its required monitor binding and was denied before reaching the grant check |
-    | Second correction | Failed after 15.11 s | Grant denial passed; the fixture still expected a thrown error where current IPC returns typed terminal metadata |
-    | Third correction | Failed after 16.86 s | Typed status/code and non-retryable checks passed; the older owner-end text expectation was stale |
-    | Fourth correction | Failed after 16.81 s | The cached ended popout uses a documented generic terminal message; that candidate's exact owner-text assertion was too strict |
-    | Corrected full flow | **Passed**, 35.98 s overall | Native frames, host restart recovery, independent window gates, specific View-only denial, typed terminal responses, 16-second main/popout ended-state hold, no authorized sessions, denied reconnect before deliberate local Allow, unchanged five grants, multiple viewers, revocation and invitation-replay denial |
+20. **Safety-net component runs: one incomplete, one slow (2026-10-27).** The first low-entropy native run stopped after 2,718 frames because the GPU video path failed and the stream moved to the CPU path. A second run encoded only 14.7 frames per second while the PC was busy; a quiet rerun reached 60.0. See [Bitrate safety net](#bitrate-safety-net-native-component-results).
 
-    The corrected fixture accepts only the finite source-defined terminal messages and exact terminal status/code pairs, requires non-retryable errors without frame data, and preserves the original UI and no-auto-resume checks. Automatic traces, screenshots and video are disabled for the native flow; controlled dashboard screenshots occur before pairing. This passing development flow does not establish packaged, cross-device or real-input validation.
+21. **Host test executable crash, exit code 139 (2026-10-27).** The crashing process is not identified; it did not coincide with a C2 component runner run. Not reproduced in 38 later processes. A real GPU binding use-after-free race was found and fixed, and is a plausible cause; this is not proven. See [Test-suite stability](#test-suite-stability).
+
+22. **Short pairing code: expiry check could overflow (2026-10-27).** A review of the landed, disabled short pairing code found that the viewer checked the host's untrusted expiry time with `Math.Abs(expiresAt - now)`. For extreme values such as `now + Int64.MinValue` this throws an overflow exception instead of returning a protocol error. Fixed in 4b56226 with ordered bounds (within 3,600 s either side of now). New checks accept ±3,600 s and refuse ±3,601 s, `Int64.MinValue`, `Int64.MaxValue` and `now + Int64.MinValue` without an exception; with the old form put back, the suite fails. An independent check of the extracted helper passed 28 of 28 and reproduced the old exception.
 
 ## Decision log
 
@@ -391,19 +462,25 @@ Status: **decided** (agreed and in effect or merged), **in progress** (agreed, n
 | 2026-10-27 | Timing runs use the generated test source; real-desktop tests are separate | Real-desktop runs could not start reliably; generated frames can be counted; the source is absent from release builds | Decided |
 | 2026-10-27 | No operating-system input tests on the Windows development desktop; input is tested on the ARM laptop and Mac in test-owned windows | The desktop is the developer's working machine | Decided |
 | 2026-10-27 | Per-device stream limits: 4 per device, 8 per host | Bound resource use | Decided |
-| 2026-10-27 | Release verification on the build machine skips the real-desktop capture group and the four direct native-input probes, and prints each skipped name and the count | The build machine's display was asleep (capture checks cannot get a frame), and the input probes would touch the real input system. A later development checkout passed 1,165 remaining host checks; this count is not the frozen preview.5 baseline. An earlier retained-check runner on that release baseline passed 1,145 host checks. The Windows development-app UI fixture initially failed, then its corrected full flow passed in 35.98 s including the 16-second ended-session hold. Packaged-app validation is a separate release gate | Decided |
+| 2026-10-27 | Release verification on the build machine skips the real-desktop capture group and the four direct native-input probes, and prints each skipped name and the count | The build machine's display was asleep (capture checks cannot get a frame), and the input probes would touch the real input system. With the switch on, 1,165 of 1,165 remaining host checks passed. A preview.5 candidate's packaged end-to-end UI check failed the same day; a test-fixture correction was proposed and the release was held | Decided |
 | 2026-10-27 | Windows encoders stay on Media Foundation, which already reaches the NVIDIA, Intel and AMD hardware encoders; encoders are chosen by probed capabilities, not vendor names | Avoids three vendor SDKs. A vendor SDK only if a measured Media Foundation limit blocks a goal | Decided; capability probing in progress |
 | 2026-10-27 | H.264 first; HEVC and then AV1 only after H.264 meets its gates and both ends report support | Codec support differs per device and must be probed | Decided |
 | 2026-10-27 | Viewer tries software decoding before falling back to images, and reports which decoder is active without claiming hardware when unknown | A hardware decoder error should not drop straight to images | Decided; merged |
 | 2026-10-27 | Avoid the main-process-to-window copy | Electron cannot transfer data buffers there | Rejected |
 | 2026-10-27 | Static maximum QP 51 as the default | Would lower text quality in normal use | Rejected |
 | 2026-10-27 | Change maximum QP on a running encoder | Documented as static; the readback did not change | Rejected; QP changes reopen the encoder |
-| 2026-10-27 | Bitrate overshoot ladder: start at QP 30; under sustained overshoot, reopen at QP 51 at the current size and rate, then scale 0.5, then 0.33, then 30 fps, then 15 fps, each with a fresh configuration and keyframe; at 4 times the target or more, jump straight to the first step predicted to fit. When recovering step by step, frame rate is restored first, then scale, then QP 30 | Based on the calibration above. Gate revision: the opening high-entropy keyframe at QP 30 is reported as a known limit rather than blocking the change, and the first window after each reopen is excluded from the overshoot count; all bytes still count in the reported mean and peak. Remaining gates: under 150 % within 6 s, low entropy unchanged, no text-quality loss, sharp text within 1 s after noise | In progress; not merged |
-| 2026-10-27 | Short pairing code: 8 characters of base32 (40 random bits), single use, 10-minute expiry, cancelled after 5 failed attempts, plus a per-source rate limit; the long invitation stays | A code a person can read aloud. A password-authenticated exchange is required so that an attacker in the middle gets one online guess per attempt and no offline check | In progress |
+| 2026-10-27 | Bitrate overshoot ladder: start at QP 30; under sustained overshoot, reopen at QP 51 at the current size and rate, then scale 0.5, then 0.33, then 30 fps, then 15 fps, each with a fresh configuration and keyframe; at 4 times the target or more, jump straight to the first step predicted to fit. When recovering step by step, frame rate is restored first, then scale, then QP 30 | Based on the calibration above. Gate revision: the opening high-entropy keyframe at QP 30 is reported as a known limit rather than blocking the change, and the first window after each reopen is excluded from the overshoot count; all bytes still count in the reported mean and peak. Remaining gates: under 150 % within 6 s, low entropy unchanged, no text-quality loss, sharp text within 1 s after noise | In progress; not merged. Native component results on 2026-10-27 meet the settling gate and leave the low-entropy frame rate and bitrate unchanged ([results](#bitrate-safety-net-native-component-results)); the quality gates (Stages 3 and 4) have not run |
+| 2026-10-27 | Short pairing code: 8 characters of base32 (40 random bits), single use, 10-minute expiry, cancelled after 5 failed attempts, plus a per-source rate limit; the long invitation stays | A code a person can read aloud. A password-authenticated exchange is required so that an attacker in the middle gets one online guess per attempt and no offline check | Implemented; merged disabled on 2026-10-27 (see below) |
 | 2026-10-27 | One active short code per host | A host cannot tell which of several codes a viewer is using without a selector that would weaken the code | Decided |
-| 2026-10-27 | PAKE: SRP-6a (RFC 5054 3072-bit group, SHA-256) with both roles run in the .NET host, using one library; the viewer's app delegates its role to its own local host. Both sides confirm with HMAC-SHA256 over a transcript that includes both TLS certificate fingerprints before anything is pinned or granted | One implementation on both sides avoids the interoperability problem | Decided as design. The library version is not pinned yet: the current release lacks a newer upstream hardening for SRP; no code written |
+| 2026-10-27 | PAKE: SRP-6a (RFC 5054 3072-bit group, SHA-256) with both roles run in the .NET host, using one library; the viewer's app delegates its role to its own local host. Both sides confirm with HMAC-SHA256 over a transcript that includes both TLS certificate fingerprints before anything is pinned or granted | One implementation on both sides avoids the interoperability problem | Decided as design. At the time of this decision the library version was not pinned and no code was written. Later the same day it was implemented with BouncyCastle.Cryptography 2.7.0, pinned exactly; that release lacks a newer upstream SRP hardening (exponent blinding) |
 | 2026-10-27 | Tailscale plus trust on first use instead of a PAKE | Does not independently prove the code | Rejected |
 | 2026-10-27 | Raspberry Pi host (Linux ARM64, image frames first, then hardware video) | Paused by the user | Paused |
+| 2026-10-27 | Merge the short pairing code switched off: it runs only when the environment variable `ORBIT_EXPERIMENTAL_SHORT_CODE=1` is set, and the packaged desktop app removes that variable before it starts its host | Two independent security reviews found it safe to merge disabled, not safe to enable | Decided; merged disabled |
+| 2026-10-27 | Keep the short pairing code off by default | Two blockers: the pinned SRP library release lacks upstream exponent blinding, and a review of the complete protocol composition is not finished | Decided; still blocked |
+| 2026-10-27 | An unfinished short-code attempt is bound to its TLS connection; a verify or confirm from another connection fails the attempt. Only a completed attempt may fetch its identical receipt again (same certificate and confirmation, within 2 minutes) | Found in review: the documented connection contract and the implementation differed. The client keeps one connection and no longer retries a confirmation | Decided; merged disabled |
+| 2026-10-27 | A C2 component result counts only for the exact build it ran on; the GPU binding fix is merged on main separately and carried into the next C2 build before Stages 3 and 4 | The fix changes product code under the Stage 2 evidence (bc9809f does not contain it) | Decided |
+| 2026-10-28 | Viewer keeps up to three records in flight to the decoder and shows the newest decoded frame, at most two draws per display refresh; every frame is still decoded | The bench showed equal paced p95 and burst p95 within 1 ms, with no dropped frames | Decided; merged |
+| 2026-10-28 | Bolder Daylight and Graphite themes, checked for WCAG AA contrast and colour-blind status separation in the desktop unit suite | Owner's design choice. The check runs with every desktop unit-test run, so a colour change that breaks these rules fails the suite | Decided; merged |
 
 ## Security reviews
 
@@ -423,18 +500,36 @@ Status: **decided** (agreed and in effect or merged), **in progress** (agreed, n
 
 **27 October 2026, short pairing code design review.** Findings that changed the design before any code: pick one active code per host; define the exact transcript, including both certificate fingerprints taken from the live TLS connection; finish mutual confirmation before pinning or granting; keep unknown certificates confined to the pairing route; count attempts atomically across concurrent requests; keep 40 random bits with no modulo bias; and keep the code only in memory. For one code and five guesses, the chance of guessing is at most 5 in 2⁴⁰, about 4.55 × 10⁻¹². That bound is a calculation, not a proof of the whole implementation.
 
+**27 October 2026, short pairing code implementation (experimental, disabled).** The short pairing code was implemented and merged switched off (4f729fe, dd8b5c0, 3fb9aae, 5ec2d6c, then 4b56226). It runs only when `ORBIT_EXPERIMENTAL_SHORT_CODE=1` is set, and the packaged desktop app removes that variable before it starts its host. The long invitation remains the way to pair. As implemented: an 8-symbol code from 5 random bytes, one active code per host, single use, 10-minute expiry, an attempt budget of 5 counted atomically, and a per-source rate limit; SRP-6a with both roles in the .NET host; a role-tagged transcript bound to both live TLS certificate fingerprints, with HMAC-SHA256 confirmations in each direction; a certificate is pinned only after both sides verify; unknown client certificates can reach only the three pairing routes. The first version added 88 host checks, including test vectors cross-checked by a separate implementation.
+
+Two independent security reviews found it safe to merge disabled. Changes made in response:
+
+- An unfinished attempt is bound to one TLS connection; only a completed attempt may fetch its identical receipt again, within 2 minutes. A test shows the client never opens a second connection for an unfinished attempt.
+- The transcript now also covers the attempt ID, the salt and both public SRP values (1,080 bytes), and SRP values outside 0 < x < N are refused.
+- The code is consumed before the certificate is pinned, as with the long invitation.
+- If saving the device list fails, the in-memory list is restored, so neither pairing path leaves an unsaved certificate trusted until restart.
+- A shared display-name rule refuses control characters, bidirectional overrides and isolates, and other invisible format characters, on both pairing paths. Zero-width joiner and non-joiner and the left-to-right and right-to-left marks stay allowed because some scripts and emoji need them and they cannot reorder text.
+- Completed-attempt lookups compare attempt IDs in constant time. Release builds restore packages from the committed lock file, and the Bouncy Castle MIT notice ships with the app.
+
+An independent byte-level check of the test vectors passed 23 of 23 on the first submitted version and, after the transcript and connection changes, 32 vector checks plus 4 environment checks on the revised version. A later review found the expiry overflow fixed in 4b56226 ([failure 22](#experiments-that-failed-or-were-rejected)). At merge, host checks passed 1,363 of 1,363 and desktop tests 627 of 627; after the expiry fix the host suite passed 1,365 of 1,365.
+
+Turning the short code on by default is **still blocked** for two reasons: the pinned BouncyCastle.Cryptography 2.7.0 release lacks the upstream SRP exponent blinding, and a review of how the whole protocol fits together (SRP, the TLS binding, the confirmations and pinning) is not finished.
+
 No independent security audit has been done. The threat model and remaining release requirements are in [SECURITY.md](../SECURITY.md).
 
 ## Not tested and known limits
 
 - **AMD and Intel hardware encoders.** No such hardware was available.
-- **Video from Mac and Linux hosts.** They send images. A Mac helper protocol and managed parser exist; the Swift capture producer and VideoToolbox encoder have not been implemented.
+- **Video from Mac and Linux hosts.** They send images. A Mac capture and encoder helper is designed but not connected.
 - **Linux at all.** The Linux backend has not run on real hardware; hardware decoding on a Linux viewer is untested.
 - **Click-to-screen latency**, on one machine or between two.
 - **Sustained video between two unlocked computers**, and direct versus relayed Tailscale paths for video.
 - **Real packet loss.** The impairment proxy cannot drop packets.
 - **Adapting to a slow link.** The 8 Mbit/s cap runs fell back instead of adapting.
-- **Busy or noisy content** can exceed the bitrate target many times over; the overshoot response is not merged.
+- **Busy or noisy content** can exceed the bitrate target many times over; the overshoot response is not merged. Its component results do not include the viewer, the network or image quality, and its opening keyframe on noisy content is still over the keyframe budget.
+- **Viewer presentation timing** was measured to the canvas draw on generated, software-encoded content with a simulated main-process hop, not to the display and not with a hardware-encoded live stream.
+- **Short pairing code** is experimental and switched off; it is not ready to be enabled.
+- **The exit code 139 crash** was not reproduced, and the crashing process is not identified; a plausible cause is fixed, but that is not proven.
 - **Long runs.** No soak test longer than a few minutes; no resource-use (CPU, GPU, memory) tracking over time.
 - **Several monitors streaming at once**, mixed DPI, hot-plugging.
 - **Spontaneous capture loss** (only injected resets were tested), sleep and wake, lock and sign-in screens.
@@ -445,7 +540,7 @@ No independent security audit has been done. The threat model and remaining rele
 
 ## How to reproduce
 
-The internal measurement harnesses (numeric collectors, the byte-level impairment proxy and the encoder-only bitrate harness) are not published. Their results are stated on this page. The public pieces are:
+The internal measurement harnesses (numeric collectors, the byte-level impairment proxy, the encoder-only bitrate harness and the safety-net component runner) are not published. Their results are stated on this page. The public pieces are:
 
 - [docs/PERFORMANCE.md](PERFORMANCE.md): pipeline description, method notes and a repeatable measurement checklist.
 - [scripts/perf/measure-frames.mjs](../scripts/perf/measure-frames.mjs) and its [README](../scripts/perf/README.md): image-path frame cost against the real host on loopback.
@@ -454,4 +549,5 @@ The internal measurement harnesses (numeric collectors, the byte-level impairmen
 - [tests/Orbit.Host.Tests/H264EncoderChecks.cs](../tests/Orbit.Host.Tests/H264EncoderChecks.cs) and [tests/Orbit.Host.Tests/TextSharpnessSpike.cs](../tests/Orbit.Host.Tests/TextSharpnessSpike.cs): hardware encoder checks and the generated text-sharpness test.
 - [tests/Orbit.Host.Tests/Program.cs](../tests/Orbit.Host.Tests/Program.cs): the host test suite. `ORBIT_TEST_SKIP_NATIVE_DESKTOP=1` skips only the real-desktop capture group and the four direct native-input probes, and prints their names.
 - [scripts/check.ps1](../scripts/check.ps1): host checks, desktop tests and build.
+- [apps/desktop/tests/theme-contrast.cjs](../apps/desktop/tests/theme-contrast.cjs): the contrast and colour-vision check. From `apps/desktop`, run `node tests/theme-contrast.cjs`.
 - [docs/VALIDATION.md](VALIDATION.md) and [docs/MACOS-VALIDATION.md](MACOS-VALIDATION.md): the validation records.

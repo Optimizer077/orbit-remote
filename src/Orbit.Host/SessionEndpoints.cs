@@ -4,10 +4,20 @@ namespace Orbit.Host;
 
 internal static class SessionEndpoints
 {
+    /// <summary>
+    /// Session creation per paired device (H-4): a burst of 4, refilled at 1 per second. A
+    /// viewer opens at most 2 sessions at once and retries with backoff; churning sessions to
+    /// flood the audit history or reset per-session budgets is held to this rate.
+    /// </summary>
+    internal const double CreationsPerSecond = 1;
+    internal const int CreationBurst = 4;
+
+    internal static DeviceRateLimiter CreateLimiter(TimeProvider? clock = null) => new(CreationsPerSecond, CreationBurst, clock);
+
     internal static void MapSessions(this WebApplication app, HostState state, IPlatformBackend platform,
         Func<HttpContext, PairedDevice?> peer, Func<HttpContext, string, RemoteSession?> findSession,
         Func<RemoteSession, object> sessionInfo, Func<bool> identityUnavailable,
-        SemaphoreSlim inputGate, InputLeases inputLeases, HostShutdown shutdown)
+        SemaphoreSlim inputGate, InputLeases inputLeases, HostShutdown shutdown, DeviceRateLimiter? creations = null)
     {
         bool Stopping() => shutdown.IsStopping || app.Lifetime.ApplicationStopping.IsCancellationRequested;
         PairedDevice? CurrentPeer(HttpContext context)
@@ -29,6 +39,11 @@ internal static class SessionEndpoints
         app.MapPost("/api/sessions", async (HttpContext context, SessionRequest request) =>
         {
             if (Revalidate(context, request, out var device) is { } initialDenied) return initialDenied;
+            if (creations is not null && !creations.TryAcquire(device!.Id))
+            {
+                context.Response.Headers.RetryAfter = "1";
+                return Results.Json(new { error = "Too many new sessions from this device. Wait a moment and try again.", code = "session_rate_limited" }, statusCode: 429);
+            }
 #if ORBIT_DIAGNOSTICS
             if (DiagnosticSource.IsSynthetic(platform) && !request.ViewOnly)
                 return Results.BadRequest(new { error = "Diagnostic synthetic sources require an explicit view-only session." });

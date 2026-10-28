@@ -2,12 +2,13 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
-const { SessionVideoStreams, ACK_INTERVAL_MS, MAX_UNCONSUMED_UNITS, MAX_QUEUED_RECORDS, frameRequestError } = require('./stream-session.cjs');
+const { SessionVideoStreams, ACK_INTERVAL_MS, MAX_UNCONSUMED_UNITS, MAX_QUEUED_RECORDS, VIDEO_CREDIT_WINDOW, frameRequestError } = require('./stream-session.cjs');
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const turn = () => new Promise(resolve => setImmediate(resolve));
 const config = { codec: 'avc1.4D4028', width: 1920, height: 1080, codedWidth: 1920, codedHeight: 1088,
   physicalLeft: -1920, physicalTop: 5, physicalWidth: 1920, physicalHeight: 1080, scale: 1, fps: 60, monitorId: 'display-1' };
 const unit = Uint8Array.of(0, 0, 0, 1, 0x65, 1);
+const delta = Uint8Array.of(0, 0, 0, 1, 0x41, 1); // non-IDR slice: the parser checks the keyframe flag against NAL types
 function record(type, value, sequence, flags = 0) {
   const body = value instanceof Uint8Array ? Buffer.from(value) : Buffer.from(JSON.stringify(value));
   const header = Buffer.alloc(24); header[0] = type; header[1] = flags;
@@ -109,6 +110,23 @@ test('fully received validated AUs are cumulatively acknowledged before decoder 
   assert.equal(f.manager.entries.get(f.opened.streamId).queue.length, 2);
 });
 
+test('records cross the Electron port without a transfer list and carry an exclusively owned payload buffer', async t => {
+  const f = fixture(t); await turn(); const c = f.connections[0];
+  const counts = [], post = f.port.postMessage.bind(f.port);
+  // Electron's MessagePortMain.postMessage throws for any transfer entry that is not a MessagePortMain.
+  f.port.postMessage = (...args) => {
+    counts.push(args.length);
+    if (args[1] !== undefined && (!Array.isArray(args[1]) || args[1].some(item => !(item instanceof Port)))) throw new TypeError('Port at index 0 is not a valid port');
+    post(args[0]);
+  };
+  f.port.receive({ type: 'credit', count: 1 }); c.feed(record(1, config, 0));
+  f.port.receive({ type: 'credit', count: 1 }); c.feed(Buffer.concat([record(2, unit, 1, 1), record(3, new Uint8Array(), 2)]));
+  const sent = f.port.messages.find(message => message.record?.type === 'access-unit');
+  assert.ok(sent, 'the access unit reached the port'); assert.equal(f.port.closed, false); assert.equal(f.manager.entries.size, 1);
+  assert.ok(counts.every(count => count === 1));
+  assert.ok(sent.record.data instanceof ArrayBuffer); assert.deepEqual(new Uint8Array(sent.record.data), unit);
+  assert.equal(sent.record.data.byteLength, unit.byteLength, 'never a view onto a pooled Buffer slab');
+});
 test('credit admits one record at a time and physical input geometry becomes available only after presentation', async t => {
   const f = fixture(t); await turn(); const c = f.connections[0];
   f.port.receive({ type: 'credit', count: 1 }); c.feed(record(1, config, 0)); c.feed(record(2, unit, 1, 1));
@@ -121,15 +139,121 @@ test('credit admits one record at a time and physical input geometry becomes ava
   assert.deepEqual(f.session.frameSlots.get('').frame, { width: 1920, height: 1080, left: -1920, top: 5 });
   assert.equal(f.session.frame.width, 1920);
 });
+// S2 credit window: records in flight to the renderer never exceed the window, whatever the burst.
+const inFlightRecords = f => f.port.messages.filter(x => x.type === 'record').length;
+test('the credit window keeps at most VIDEO_CREDIT_WINDOW records in flight and refills one per returned credit', async t => {
+  const f = fixture(t); await turn(); const c = f.connections[0];
+  assert.ok(VIDEO_CREDIT_WINDOW > 1 && VIDEO_CREDIT_WINDOW <= 4, 'a small bounded window');
+  c.feed(record(1, config, 0));
+  for (let seq = 1; seq <= 8; seq++) c.feed(record(2, seq === 1 ? unit : delta, seq, seq === 1 ? 1 : 0));
+  f.port.receive({ type: 'credit', count: VIDEO_CREDIT_WINDOW });
+  assert.equal(inFlightRecords(f), VIDEO_CREDIT_WINDOW, 'one burst of records, no more than the window');
+  let returned = 0;
+  for (let step = 0; step < 6; step++) {
+    f.port.receive({ type: 'credit', count: 1 }); returned++;
+    assert.equal(inFlightRecords(f) - returned, VIDEO_CREDIT_WINDOW, 'each returned credit admits exactly one more record');
+  }
+  assert.equal(inFlightRecords(f), 9); assert.equal(f.manager.entries.get(f.opened.streamId).credit, VIDEO_CREDIT_WINDOW - 3);
+});
+test('a Worker that stops returning credit pauses the transport, then the window drains the backlog when credit returns', async t => {
+  const f = fixture(t); await turn(); const c = f.connections[0], entry = f.manager.entries.get(f.opened.streamId);
+  f.port.receive({ type: 'credit', count: VIDEO_CREDIT_WINDOW });
+  c.feed(record(1, config, 0));
+  for (let seq = 1; seq < VIDEO_CREDIT_WINDOW; seq++) c.feed(record(2, seq === 1 ? unit : delta, seq, seq === 1 ? 1 : 0));
+  assert.equal(entry.credit, 0); assert.equal(entry.queue.length, 0);
+  // The Worker is stalled: further units queue in main and each read asks the transport to pause.
+  const reads = [];
+  for (let seq = VIDEO_CREDIT_WINDOW; seq < VIDEO_CREDIT_WINDOW + 5; seq++) reads.push(c.feed(record(2, delta, seq)));
+  assert.deepEqual(reads, [false, false, false, false, false]); assert.equal(entry.queue.length, 5);
+  assert.equal(inFlightRecords(f), VIDEO_CREDIT_WINDOW);
+  const resumes = c.resumes;
+  f.port.receive({ type: 'credit', count: VIDEO_CREDIT_WINDOW });
+  assert.equal(inFlightRecords(f), 2 * VIDEO_CREDIT_WINDOW, 'returned credit admits the window, not the whole backlog');
+  f.port.receive({ type: 'credit', count: 2 });
+  assert.equal(entry.queue.length, 0); assert.ok(c.resumes > resumes, 'an empty queue resumes reading');
+  assert.equal(f.port.closed, false);
+});
+test('the oldest uncredited record trips the decoder stall after five seconds even while window credit remains', async t => {
+  let now = 0; const f = fixture(t, { now: () => now }); await turn();
+  f.port.receive({ type: 'credit', count: VIDEO_CREDIT_WINDOW }); f.connections[0].feed(record(1, config, 0));
+  assert.equal(f.manager.entries.get(f.opened.streamId).credit, VIDEO_CREDIT_WINDOW - 1);
+  now = 4900; await sleep(310); assert.equal(f.manager.entries.size, 1);
+  now = 5001; await sleep(310);
+  assert.equal(f.port.messages.at(-1).code, 'decoder_stalled'); assert.equal(f.manager.entries.size, 0);
+});
+test('keyframe-needed keeps units admitted after the reset: a keyframe in flight is presented, discarded units are reported', async t => {
+  const f = fixture(t), presented = []; f.manager.onPresented = entry => presented.push(entry.monitorId);
+  await turn(); const c = f.connections[0], entry = f.manager.entries.get(f.opened.streamId);
+  f.port.receive({ type: 'credit', count: VIDEO_CREDIT_WINDOW }); c.feed(record(1, config, 0));
+  c.feed(record(2, unit, 1, 1)); c.feed(record(2, delta, 2));
+  f.port.receive({ type: 'credit', count: 1 }); c.feed(record(2, unit, 3, 1)); // keyframe 3 is in flight
+  // The decoder resets: it reports the units it discarded, then asks for a keyframe.
+  f.port.receive({ type: 'consumed', sequence: 1, dropped: true }); f.port.receive({ type: 'consumed', sequence: 2, dropped: true });
+  f.port.receive({ type: 'keyframe-needed', reason: 'decoder-error' });
+  assert.equal(f.port.messages.at(-1).state, 'recovering');
+  assert.deepEqual([...entry.pending.keys()], [3], 'only the discarded units leave; the in-flight keyframe stays pending');
+  f.port.receive({ type: 'presented', sequence: 3, decodeMs: .5, drawMs: .2 });
+  assert.equal(presented.length, 1, 'its presentation counts and ends recovery');
+  assert.deepEqual(f.session.frameSlots.get('').frame, { width: 1920, height: 1080, left: -1920, top: 5 });
+  assert.equal(entry.pending.size, 0);
+});
+test('a doubled or invented credit cannot widen the window after the first grant', async t => {
+  let f = fixture(t); await turn(); let c = f.connections[0];
+  f.port.receive({ type: 'credit', count: 1 }); c.feed(record(1, config, 0));
+  f.port.receive({ type: 'credit', count: 1 }); // the config record was handled
+  assert.equal(f.manager.entries.size, 1);
+  f.port.receive({ type: 'credit', count: 1 }); // nothing is in flight: a doubled credit
+  assert.equal(f.port.messages.at(-1).code, 'invalid_worker_message'); assert.equal(f.manager.entries.size, 0);
+  f = fixture(t); await turn(); c = f.connections[0];
+  f.port.receive({ type: 'credit', count: 1 }); c.feed(record(1, config, 0));
+  f.port.receive({ type: 'credit', count: 2 }); // one record in flight, two credits back
+  assert.equal(f.port.messages.at(-1).code, 'invalid_worker_message', 'more credit than records in flight fails closed');
+});
+test('a superseded unit leaves the pending set without counting as a presentation', async t => {
+  const f = fixture(t), presented = []; f.manager.onPresented = entry => presented.push(entry.monitorId);
+  await turn(); const c = f.connections[0], entry = f.manager.entries.get(f.opened.streamId);
+  f.port.receive({ type: 'credit', count: VIDEO_CREDIT_WINDOW }); c.feed(record(1, config, 0));
+  c.feed(record(2, unit, 1, 1)); c.feed(record(2, delta, 2));
+  f.port.receive({ type: 'superseded', sequence: 1 });
+  assert.equal(entry.pending.has(1), false); assert.equal(presented.length, 0); assert.equal(f.session.frameSlots.get('').frame, null);
+  f.port.receive({ type: 'presented', sequence: 2, decodeMs: .5, drawMs: .2 });
+  assert.equal(presented.length, 1); assert.equal(entry.pending.size, 0);
+  f.port.receive({ type: 'superseded', sequence: -1 });
+  assert.equal(f.port.messages.at(-1).code, 'invalid_worker_message', 'a malformed supersession fails closed');
+});
+
+test('viewer timing: control round trip and main queue wait use main\'s clock and ride on the next record', async t => {
+  let now = 0; const f = fixture(t, { now: () => now }); await turn(); const c = f.connections[0];
+  const releases = []; f.controller.remote = () => new Promise(resolve => releases.push(resolve));
+  f.port.receive({ type: 'credit', count: 1 }); c.feed(record(1, config, 0));
+  now = 100; c.feed(record(2, unit, 1, 1));
+  await sleep(5); assert.equal(releases.length, 1, 'the existing ack POST is the only request');
+  now = 107.5; releases[0]({}); await turn();
+  now = 112; f.port.receive({ type: 'credit', count: 1 });
+  const records = () => f.port.messages.filter(message => message.type === 'record');
+  assert.equal('mainQueueMs' in records()[0], false, 'config records carry no frame timing');
+  assert.equal(records()[1].mainQueueMs, 12); assert.equal(records()[1].rttMs, 7.5);
+  assert.equal(records()[1].rttAgeMs, 4.5, 'the sample carries its age, so the viewer files it at its measurement time');
+  f.port.receive({ type: 'credit', count: 1 }); now = 113; c.feed(record(2, delta, 2, 0));
+  assert.equal(records()[2].mainQueueMs, 0); assert.equal('rttMs' in records()[2], false, 'each round trip is reported once');
+});
+test('viewer timing: a failed control request records no round trip', async t => {
+  let now = 0; const f = fixture(t, { now: () => now }); await turn(); const c = f.connections[0];
+  const entry = f.manager.entries.get(f.opened.streamId);
+  f.controller.remote = async () => { now += 3; throw Object.assign(new Error('Generated busy'), { status: 429 }); };
+  f.port.receive({ type: 'credit', count: 1 }); c.feed(record(1, config, 0)); c.feed(record(2, unit, 1, 1));
+  await sleep(5);
+  assert.equal(entry.roundTripMs, undefined);
+});
 
 test('a frozen consumer has a bounded AU queue and excess units abort transport without killing main', async t => {
   const f = fixture(t); await turn(); const c = f.connections[0];
   c.feed(record(1, config, 0));
   // Without credit nothing reaches the renderer: the record queue bound (payload memory) is the one that trips.
   const held = Math.min(MAX_QUEUED_RECORDS - 1, MAX_UNCONSUMED_UNITS);
-  for (let seq = 1; seq <= held; seq++) c.feed(record(2, unit, seq, seq === 1 ? 1 : 0));
+  for (let seq = 1; seq <= held; seq++) c.feed(record(2, seq === 1 ? unit : delta, seq, seq === 1 ? 1 : 0));
   assert.equal(f.port.closed, false); assert.equal(f.manager.entries.get(f.opened.streamId).queue.length, held + 1);
-  assert.equal(c.feed(record(2, unit, held + 1)), false);
+  assert.equal(c.feed(record(2, delta, held + 1)), false);
   assert.equal(f.port.closed, true); assert.equal(c.aborts, 1);
   assert.equal(f.port.messages.at(-1).code, 'stream_protocol_error');
   assert.equal(f.controller.sessions.size, 1, 'PNG fallback keeps existing authorization, never creates a session');
@@ -139,12 +263,24 @@ test('a decoder holding 12 consumed-but-unpresented units (its own recovery cap)
   const f = fixture(t); await turn(); const c = f.connections[0];
   f.port.receive({ type: 'credit', count: 1 }); c.feed(record(1, config, 0));
   for (let seq = 1; seq <= 12; seq++) {
-    f.port.receive({ type: 'credit', count: 1 }); c.feed(record(2, unit, seq, seq === 1 ? 1 : 0));
+    f.port.receive({ type: 'credit', count: 1 }); c.feed(record(2, seq === 1 ? unit : delta, seq, seq === 1 ? 1 : 0));
     f.port.receive({ type: 'consumed', sequence: seq, dropped: false });
   }
   assert.equal(f.port.closed, false, 'a 12-frame decoder hiccup is not a protocol violation');
   assert.equal(f.port.messages.filter(x => x.type === 'record' && x.record.type === 'access-unit').length, 12);
   assert.ok(MAX_UNCONSUMED_UNITS > 12);
+});
+test('12 waiting units plus a full credit window and one frame awaiting display, then a parsed unit, stay within bounds', async t => {
+  const f = fixture(t); await turn(); const c = f.connections[0];
+  f.port.receive({ type: 'credit', count: VIDEO_CREDIT_WINDOW }); c.feed(record(1, config, 0));
+  const held = 12 + 1 + VIDEO_CREDIT_WINDOW; // decoder queue, display slot, Worker admission
+  for (let seq = 1; seq <= held; seq++) {
+    c.feed(record(2, seq === 1 ? unit : delta, seq, seq === 1 ? 1 : 0));
+    if (seq <= 13) { f.port.receive({ type: 'credit', count: 1 }); f.port.receive({ type: 'consumed', sequence: seq, dropped: false }); }
+  }
+  c.feed(record(2, delta, held + 1));
+  assert.equal(f.port.closed, false, 'the deepest legitimate pipeline is not a protocol violation');
+  assert.ok(MAX_UNCONSUMED_UNITS >= held + 1);
 });
 
 test('terminal host-end immediately deletes authority, clears geometry and ends every stream attached to that session', async t => {
@@ -258,16 +394,22 @@ test('repeated decoder recovery requests cannot issue keyframes faster than twic
   assert.ok(f.calls.at(-1).at - keyframes[0].at >= 500);
 });
 
-test('duplicate credits fail closed and receipt acknowledgements coalesce instead of one HTTP request per AU', async t => {
+test('credit beyond the window fails closed and receipt acknowledgements coalesce instead of one HTTP request per AU', async t => {
   let f = fixture(t); await turn();
-  f.port.receive({ type: 'credit', count: 1 }); f.port.receive({ type: 'credit', count: 1 });
+  f.port.receive({ type: 'credit', count: VIDEO_CREDIT_WINDOW });
+  assert.equal(f.manager.entries.get(f.opened.streamId).credit, VIDEO_CREDIT_WINDOW, 'the whole window is accepted at once');
+  f.port.receive({ type: 'credit', count: 1 });
   assert.equal(f.port.messages.at(-1).code, 'invalid_worker_message'); assert.equal(f.manager.entries.size, 0);
+  for (const count of [0, -1, 1.5, '1', VIDEO_CREDIT_WINDOW + 1]) {
+    f = fixture(t); await turn(); f.port.receive({ type: 'credit', count });
+    assert.equal(f.port.messages.at(-1).code, 'invalid_worker_message', `credit ${count} fails closed`);
+  }
   assert.ok(ACK_INTERVAL_MS >= 1000 / 30);
   f = fixture(t, { ackInterval: 40 }); await turn(); const c = f.connections[0];
   f.port.receive({ type: 'credit', count: 1 }); c.feed(record(1, config, 0)); f.port.receive({ type: 'credit', count: 1 });
   c.feed(record(2, unit, 1, 1)); f.port.receive({ type: 'consumed', sequence: 1, dropped: true }); f.port.receive({ type: 'credit', count: 1 });
   await sleep(10);
-  for (let seq = 2; seq <= 6; seq++) { c.feed(record(2, unit, seq)); f.port.receive({ type: 'consumed', sequence: seq, dropped: true }); f.port.receive({ type: 'credit', count: 1 }); }
+  for (let seq = 2; seq <= 6; seq++) { c.feed(record(2, delta, seq)); f.port.receive({ type: 'consumed', sequence: seq, dropped: true }); f.port.receive({ type: 'credit', count: 1 }); }
   await sleep(60);
   assert.ok(f.calls.length <= 2); assert.equal(f.calls.at(-1).body.ack, 6);
   if (f.calls.length === 2) assert.ok(f.calls[1].at - f.calls[0].at >= 35);
@@ -293,10 +435,10 @@ test('main presentation hook runs only for an actual pending AU, never config/cr
   f.port.receive({ type: 'credit', count: 1 }); c.feed(record(2, unit, 1, 1));
   f.port.receive({ type: 'consumed', sequence: 1, dropped: true });
   f.port.receive({ type: 'presented', sequence: 1, decodeMs: 1, drawMs: 1 }); assert.equal(presented.length, 0);
-  f.port.receive({ type: 'credit', count: 1 }); c.feed(record(2, unit, 2));
+  f.port.receive({ type: 'credit', count: 1 }); c.feed(record(2, delta, 2));
   f.port.receive({ type: 'presented', sequence: 2, decodeMs: 1, drawMs: 1 }); assert.equal(presented.length, 1);
   f.port.receive({ type: 'presented', sequence: 2, decodeMs: 1, drawMs: 1 }); assert.equal(presented.length, 1);
-  f.port.receive({ type: 'credit', count: 1 }); c.feed(record(2, unit, 3));
+  f.port.receive({ type: 'credit', count: 1 }); c.feed(record(2, delta, 3));
   c.feed(record(1, config, 0));
   f.port.receive({ type: 'presented', sequence: 3, decodeMs: 1, drawMs: 1 }); assert.equal(presented.length, 1);
 });

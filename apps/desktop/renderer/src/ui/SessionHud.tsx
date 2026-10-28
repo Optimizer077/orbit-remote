@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useId, useRef, useState, type FocusEvent, type PointerEvent, type ReactNode } from 'react';
 import { Eye, Loader2, LockKeyhole, MonitorOff, MousePointer2, Pause, Unplug } from 'lucide-react';
 import type { Link } from '../api';
-import { PresentationWindow, videoQuality } from '../stream/presentation-stats';
+import { PresentationWindow, videoQuality, type ViewerLatency } from '../stream/presentation-stats';
+import type { DecodeMode } from '../stream/types';
 import './hud.css';
 
 export { videoQuality };
@@ -34,6 +35,14 @@ export type FrameStats = {
   lateFrames?: number;
   /** Video: longest interval between two drawn frames in the last two seconds, ms. */
   longestGapMs?: number;
+  /** Video: active decode path. 'hardware' only once a hardware-only decoder produced a frame; otherwise never assumed. */
+  decodeMode?: DecodeMode;
+  /** Video: decoded frames replaced by a newer one within the same display refresh (last two seconds). Not drops. */
+  superseded?: number;
+  /** Video: frames the decoder discarded and never displayed (last two seconds). */
+  dropped?: number;
+  /** Video: viewer-side percentiles over the last two seconds; never glass-to-glass latency. */
+  latency?: ViewerLatency;
   /** Transfer throughput while fetching (bytes × 8 / ms = kbit/s), EWMA. Only when bytes were recorded. */
   kbps?: number;
   lastBytes?: number;
@@ -109,6 +118,20 @@ const KEEP_VISIBLE_ZONE_PX = 110;
 const REVEAL_REST_MS = 400;
 const REVEAL_REST_SLOP_PX = 4;
 
+/**
+ * Tracks one return to live video, for the single "Back to live video." announcement.
+ * none: no live image yet (first connect), or after paused, asleep or ended; shown: live with an image;
+ * lost: reconnecting after an image was live; returned: live with an image again after lost.
+ */
+export type LiveRecovery = 'none' | 'shown' | 'lost' | 'returned';
+/** Pure: the recovery phase after the HUD shows `state`. Only reconnecting, then live with an image, gives `returned`. */
+export function nextLiveRecovery(phase: LiveRecovery, state: HudState, hasImage: boolean): LiveRecovery {
+  if (state === 'reconnecting') return phase === 'none' ? 'none' : 'lost';
+  if (state !== 'live') return 'none';
+  if (!hasImage) return phase;
+  return phase === 'lost' ? 'returned' : phase === 'none' ? 'shown' : phase;
+}
+
 export type SessionHudProps = {
   title: string;
   link?: Link;
@@ -131,11 +154,17 @@ export type SessionHudProps = {
   /** Start with the link-quality details expanded. */
   initialDetailsOpen?: boolean;
   revealRequest?: number;
+  /**
+   * The viewer shows a remote image. "Back to live video." is announced only when a screen that was live with an
+   * image comes back from reconnecting, never on the first connect. Reconnect starts a new session (a new HUD) and
+   * announces itself, so it never adds this message.
+   */
+  hasImage?: boolean;
   titleHeading?: boolean;
   onTitleDoubleClick?: () => void;
 };
 
-export function SessionHud({ title, link, ended: endedProp, state: stateProp, reconnectAttempt, stats, controlling, viewOnly, toolbar, children, forceVisible = false, detail, overlayAction, initialDetailsOpen = false, revealRequest = 0, titleHeading = false, onTitleDoubleClick }: SessionHudProps) {
+export function SessionHud({ title, link, ended: endedProp, state: stateProp, reconnectAttempt, stats, controlling, viewOnly, toolbar, children, forceVisible = false, detail, overlayAction, initialDetailsOpen = false, revealRequest = 0, hasImage = false, titleHeading = false, onTitleDoubleClick }: SessionHudProps) {
   const state: HudState = endedProp || stateProp === 'ended' ? 'ended' : stateProp;
   const live = state === 'live';
   const root = useRef<HTMLDivElement>(null);
@@ -144,6 +173,9 @@ export function SessionHud({ title, link, ended: endedProp, state: stateProp, re
   const [awake, setAwake] = useState(true);
   const [hovered, setHovered] = useState(false);
   const [focusWithin, setFocusWithin] = useState(false);
+  const [recovery, setRecovery] = useState<LiveRecovery>('none');
+  const liveRecovery = nextLiveRecovery(recovery, state, hasImage);
+  if (liveRecovery !== recovery) setRecovery(liveRecovery);
 
   const wake = useCallback(() => {
     setAwake(true);
@@ -183,7 +215,7 @@ export function SessionHud({ title, link, ended: endedProp, state: stateProp, re
   const onBlur = (e: FocusEvent<HTMLDivElement>) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setFocusWithin(false); };
 
   const visible = forceVisible || !live || awake || hovered || focusWithin;
-  const announcement = state === 'reconnecting' ? `Connection lost. Reconnecting${reconnectAttempt ? `, attempt ${reconnectAttempt}` : ''}. The last image stays visible.` : state === 'paused' ? 'Screen updates and input are paused while this window is minimized or hidden.' : state === 'asleep' ? 'The remote display is asleep. Remote input is off.' : state === 'ended' ? 'Connection ended.' : '';
+  const announcement = state === 'reconnecting' ? `Connection lost. Reconnecting${reconnectAttempt ? `, attempt ${reconnectAttempt}` : ''}. The last image stays visible.` : state === 'paused' ? 'Screen updates and input are paused while this window is minimized or hidden.' : state === 'asleep' ? 'The remote display is asleep. Remote input is off.' : state === 'ended' ? 'Connection ended.' : liveRecovery === 'returned' ? 'Back to live video.' : '';
 
   return <div ref={root} className={`hud hud-${state}`} onPointerMove={onPointerMove} onPointerDown={onPointerDown} onPointerLeave={cancelDwell} onPointerCancel={cancelDwell}>
     <div className="hud-stage">{children}</div>
@@ -199,7 +231,10 @@ export function SessionHud({ title, link, ended: endedProp, state: stateProp, re
         {overlayAction && <div className="hud-card-actions">{overlayAction}</div>}
       </div>
     </div>}
-    <div className="hud-handle" data-shown={!visible} aria-hidden="true" />
+    {/* While controlling, the hidden toolbar leaves a small reminder that input goes to the remote computer and how to get local controls back. */}
+    <div className="hud-handle" data-shown={!visible} data-control={controlling && live ? 'true' : undefined} aria-hidden="true">
+      {controlling && live && <><MousePointer2 size={13} />Controlling<kbd>Ctrl+Alt+Enter</kbd></>}
+    </div>
     <div className="hud-bar" data-visible={visible} role="region" aria-label={`Session controls for ${title}`}
       onPointerEnter={() => setHovered(true)} onPointerLeave={() => { setHovered(false); if (live) wake(); }} onFocus={onFocus} onBlur={onBlur}>
       <div className="hud-status">
@@ -247,7 +282,7 @@ function QualityMeter({ stats, paused, windowPaused, displayAsleep, initialOpen 
       <span className="hud-tip-row"><span>Last image transfer</span><b>{stats.lastBytes === undefined ? 'Not measured' : stats.unchanged ? 'Unchanged · 0 B' : `${(stats.lastBytes / 1024).toFixed(1)} KB`}</b></span>
       <span className="hud-tip-row"><span title={video ? 'Validated video payload received in the last two seconds. Transport overhead is excluded.' : 'Image bytes divided by the whole request time, including latency. Not a measure of link bandwidth.'}>{video ? 'Video payload' : 'Image throughput'}</span><b>{fmtKbps(stats.kbps)}</b></span>
       <span className="hud-tip-foot">{video ? 'Counts canvas draws, excluding dropped access units. Decode and draw timings are local; they are not end-to-end latency.' : <>Rated on the average update time<span className="hud-tip-scale">Good &lt; {goodMs} ms · Fair &lt; {fairMs} ms · Slow ≥ {fairMs} ms</span></>}</span>
-      {video && <span className="hud-tip-foot">Late frames were captured on time by the host but arrived here more than 50 ms late, measured over the last two seconds. A still screen sends no frames and is never late.</span>}
+      {video && <span className="hud-tip-foot">Late frames were captured on time by the other computer but arrived here more than 50 ms late, measured over the last two seconds. A still screen sends no frames and is never late.</span>}
     </span>
   </span>;
 }

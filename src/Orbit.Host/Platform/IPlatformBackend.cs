@@ -27,7 +27,7 @@ public interface IFrameChangeSource
 
 public sealed record PlatformStatus(string OperatingSystem, string SessionState, bool CanCapture,
     bool CanInput, bool CanClipboard, bool CanLock, IReadOnlyList<MonitorInfo> Monitors,
-    IReadOnlyList<string> Limitations, bool CanScaleFrames = false, bool CanConditionalFrames = false, bool CanJpegFrames = false, bool CanWaitForFrames = false, bool CanLocalCursor = false, string DisplayState = "unknown", bool CanWakeDisplay = false);
+    IReadOnlyList<string> Limitations, bool CanScaleFrames = false, bool CanConditionalFrames = false, bool CanJpegFrames = false, bool CanWaitForFrames = false, bool CanLocalCursor = false, string DisplayState = "unknown", bool CanWakeDisplay = false, bool CanInputBatch = false);
 public sealed record MonitorInfo(string Id, string Name, int Left, int Top, int Width, int Height, bool Primary);
 // Raw capture may leave Png empty to defer compression until after negotiation.
 public sealed record ScreenFrame(byte[] Png, int Width, int Height, int Left, int Top, DateTimeOffset CapturedUtc,
@@ -35,9 +35,15 @@ public sealed record ScreenFrame(byte[] Png, int Width, int Height, int Left, in
 public sealed record RemoteInput(string Kind, int X = 0, int Y = 0, string? Button = null,
     string? Key = null, bool? IsDown = null, int DeltaX = 0, int DeltaY = 0);
 
-public sealed class PlatformUnavailableException(string code, string message) : InvalidOperationException(message)
+/// <summary>
+/// <paramref name="message"/> is fixed host text that remote peers may see. Native or
+/// tool output (stderr, Win32 messages) belongs in <paramref name="detail"/>, which is
+/// only logged locally and never returned to a peer.
+/// </summary>
+public sealed class PlatformUnavailableException(string code, string message, string? detail = null) : InvalidOperationException(message)
 {
     public string Code { get; } = code;
+    public string? Detail { get; } = detail;
 }
 
 public static class PlatformBackendFactory

@@ -8,6 +8,8 @@ internal static class RequestBodyPolicy
 
     internal static long LimitFor(string method, PathString path, long uploadMaximumBytes)
     {
+        if (path.StartsWithSegments("/api/short-pair", StringComparison.OrdinalIgnoreCase) || path.StartsWithSegments("/api/short-code", StringComparison.OrdinalIgnoreCase))
+            return ShortPairEndpoints.MaximumBodyBytes;
         if (!HttpMethods.IsPut(method)) return OrdinaryMaximumBytes;
         var parts = (path.Value ?? "").Split('/');
         return parts.Length == 6 && parts[0].Length == 0

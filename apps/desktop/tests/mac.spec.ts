@@ -317,6 +317,63 @@ async function checkNativeInput(application: ElectronApplication, page: Page,
     await key('KeyZ', true); await key('KeyZ', false);
     await expect.poll(() => application.evaluate(({ BrowserWindow }, id) =>
       BrowserWindow.fromId(id)?.webContents.executeJavaScript('document.querySelector("textarea").value'), target.windowId)).toBe('z');
+    if (process.env.ORBIT_MAC_TEST_BATCH === '1') {
+      await presentNativeFrame(page, sessionId, target.displayId);
+      expect(await targetHasFocus(), 'Owned textarea must retain focus before the queued burst.').toBe(true);
+      const wire = await application.evaluateHandle(() => {
+        const https = process.getBuiltinModule('node:https');
+        const original = https.request;
+        const counts = { requests: 0, batches: 0, events: 0, maxEvents: 0, inFlight: 0, maxInFlight: 0, parseErrors: 0 };
+        https.request = function (this: any, ...args: any[]) {
+          const request = original.apply(this, args as any);
+          if (request.method !== 'POST' || !/^\/api\/sessions\/[^/]+\/input$/.test(request.path)) return request;
+          counts.requests++; counts.inFlight++; counts.maxInFlight = Math.max(counts.maxInFlight, counts.inFlight);
+          let complete = false;
+          const finished = () => { if (!complete) { complete = true; counts.inFlight--; } };
+          request.once('error', finished);
+          request.once('response', response => { response.once('end', finished); response.once('close', finished); });
+          const chunks: Buffer[] = []; let bytes = 0;
+          const capture = (value: unknown) => {
+            if (typeof value !== 'string' && !(value instanceof Uint8Array)) return;
+            const buffer = Buffer.from(value as any); bytes += buffer.byteLength;
+            if (bytes <= 16_384) chunks.push(buffer);
+          };
+          const write = request.write, end = request.end;
+          request.write = function (this: any, ...parts: any[]) { capture(parts[0]); return write.apply(this, parts as any); } as any;
+          request.end = function (this: any, ...parts: any[]) {
+            capture(parts[0]);
+            try {
+              if (bytes > 16_384) throw new Error('Input probe exceeded its bound.');
+              const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+              const events = Array.isArray(body.events) ? body.events.length : 1;
+              counts.events += events; counts.maxEvents = Math.max(counts.maxEvents, events);
+              if (events > 1) counts.batches++;
+            } catch { counts.parseErrors++; }
+            chunks.length = 0;
+            return end.apply(this, parts as any);
+          } as any;
+          return request;
+        } as any;
+        return { snapshot: () => ({ ...counts }), restore: () => { https.request = original; } };
+      });
+      try {
+        const events = ['KeyM', 'KeyA', 'KeyC', 'KeyB', 'KeyA', 'KeyT', 'KeyC', 'KeyH']
+          .flatMap(code => [{ type: 'key', code, down: true }, { type: 'key', code, down: false }]);
+        events.push({ type: 'key', code: 'ShiftLeft', down: true }, { type: 'key', code: 'KeyX', down: true },
+          { type: 'key', code: 'KeyX', down: false }, { type: 'key', code: 'ShiftLeft', down: false },
+          { type: 'key', code: 'KeyY', down: true }, { type: 'key', code: 'KeyY', down: false });
+        await page.evaluate(({ sessionId, monitorId, events }) => Promise.all(events.map(event =>
+          window.orbit!.invoke('session.input', { sessionId, monitorId, event }))), { sessionId, monitorId: target.displayId, events });
+        await expect.poll(() => application.evaluate(({ BrowserWindow }, id) =>
+          BrowserWindow.fromId(id)?.webContents.executeJavaScript('document.querySelector("textarea").value'), target.windowId)).toBe('zmacbatchXy');
+        const counts = await wire.evaluate(value => value.snapshot());
+        expect(counts.parseErrors).toBe(0); expect(counts.events).toBe(22);
+        expect(counts.batches, 'The host must negotiate batching for this opt-in check.').toBeGreaterThan(0);
+        expect(counts.maxEvents).toBeGreaterThan(1);
+        expect(counts.maxInFlight).toBe(1); expect(counts.inFlight).toBe(0);
+        console.log('Mac native batch counts (synthetic input only):', JSON.stringify(counts));
+      } finally { await wire.evaluate(value => value.restore()); await wire.dispose(); }
+    }
   } finally {
     await invoke('session.release-inputs', { sessionId }).catch(() => {});
     await presentNativeFrame(page, sessionId, target.restore.monitorId).then(() =>

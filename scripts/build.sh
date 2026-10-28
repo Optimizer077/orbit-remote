@@ -69,7 +69,10 @@ done
 
 dotnet --version
 host_output="$repo_root/artifacts/host/$runtime"
+# Verify package versions and content hashes against packages.lock.json before publishing.
+dotnet restore src/Orbit.Host/Orbit.Host.csproj --locked-mode
 dotnet publish src/Orbit.Host/Orbit.Host.csproj --configuration Release --runtime "$runtime" --self-contained true --output "$host_output" --nologo
+cp -- "$repo_root/THIRD_PARTY_NOTICES.md" "$host_output/THIRD_PARTY_NOTICES.md"
 node -e 'const fs = require("node:fs"); const [manifest, output, runtime] = process.argv.slice(1); const { version } = JSON.parse(fs.readFileSync(manifest, "utf8")); fs.writeFileSync(output, JSON.stringify({ runtime, version, configuration: "Release", selfContained: true }, null, 2) + "\n");' "$repo_root/apps/desktop/package.json" "$host_output/build-info.json" "$runtime"
 
 export ORBIT_HOST_RUNTIME="$runtime"

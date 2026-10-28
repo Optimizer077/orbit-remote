@@ -12,10 +12,10 @@ MONO = "Consolas, SFMono-Regular, Menlo, monospace"
 
 THEMES = {
     "dark": dict(bg="#101616", card="#16211c", box="#1d2b23", line="#33463a", text="#eceee7", muted="#a3b398",
-                 mint="#b2e6c5", mint_bg="#1e3a2b", blue="#aecaff", blue_bg="#16233a", gold="#e3cd8f", gold_bg="#3a321b",
+                 mint="#2dd4bf", mint_bg="#0c463f", blue="#aecaff", blue_bg="#16233a", gold="#e3cd8f", gold_bg="#3a321b",
                  ink="#101616"),
     "light": dict(bg="#ffffff", card="#f6f6f1", box="#ffffff", line="#d5ddcd", text="#1f2d23", muted="#4f6349",
-                  mint="#22603f", mint_bg="#dff0e4", blue="#2b5aa6", blue_bg="#e3ecfb", gold="#86651a", gold_bg="#f6ecd2",
+                  mint="#00756a", mint_bg="#ccf2eb", blue="#2b5aa6", blue_bg="#e3ecfb", gold="#86651a", gold_bg="#f6ecd2",
                   ink="#ffffff"),
 }
 

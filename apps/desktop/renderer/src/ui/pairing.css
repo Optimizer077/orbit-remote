@@ -1,0 +1,41 @@
+/* Pairing dialogs: first-run guidance that must stay readable for non-technical owners. */
+.tailscale-off-notice>div{display:flex;flex-direction:column;align-items:flex-start;gap:10px;min-width:0}
+.tailscale-off-notice .button{white-space:normal;text-align:left}
+/* Always present so screen readers announce joined/expired when its text changes. */
+.pairing-live{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.invite-countdown{font-variant-numeric:tabular-nums;font-weight:600;color:var(--text-secondary)}
+.invite-instruction{font-size:13.5px;line-height:1.5;color:var(--text-secondary);margin:-8px 0 16px}
+.invite-joined{border-color:color-mix(in srgb,var(--accent) 40%,var(--line-strong))}
+.invite-joined>svg{color:var(--accent-text)}
+.invite-expired>svg{color:var(--warning-text)}
+.invite-joined+.button,.invite-expired+.button{margin-top:2px}
+.friendly-error{display:block;min-width:0}
+.friendly-error>strong{font-weight:600}
+.friendly-error details{margin-top:6px;font-size:12px}
+.friendly-error summary{cursor:pointer;width:fit-content}
+.friendly-error code{display:block;margin-top:4px;font-family:ui-monospace,Consolas,monospace;font-size:12px;overflow-wrap:anywhere;white-space:pre-wrap}
+/* Invite: the main access decision, a plain two-way choice above the optional extras. */
+.access-choice{display:grid;gap:10px;margin-top:14px}
+.access-choice-option{display:flex;align-items:flex-start;gap:12px;padding:13px 14px;border:1px solid var(--line-strong);border-radius:var(--radius-md);background:var(--surface);cursor:pointer;color:var(--text-secondary)}
+.access-choice-option.selected{border-color:var(--accent);background:var(--surface-accent)}
+.access-choice-option>input{margin:3px 0 0;accent-color:var(--accent);flex-shrink:0}
+.access-choice-option>svg{flex-shrink:0;margin-top:1px;color:var(--text-muted)}
+.access-choice-option.selected>svg{color:var(--accent-text)}
+.access-choice-option>span{display:flex;flex-direction:column;gap:4px;min-width:0}
+.access-choice-option strong{font-size:13.5px;font-weight:600;color:var(--text)}
+.access-choice-option>span>span{font-size:12px;line-height:1.5;color:var(--text-muted)}
+.access-choice-option:has(input:focus-visible){outline:2px solid var(--focus-color);outline-offset:2px}
+/* Join success: the paired host, its security code to compare, then an explicit choice. */
+.pair-success .security-code-card code{overflow-wrap:anywhere}
+.pair-success-actions{margin-top:22px}
+/* Step indicator: where this side of the pairing is. No motion, so nothing to reduce. */
+.pair-steps{display:flex;gap:6px;margin:0 0 18px;padding:0;list-style:none}
+.pair-steps li{display:flex;align-items:center;gap:7px;flex:1 1 0;min-width:0;padding:7px 9px;border-radius:var(--radius-md);border:1px solid var(--line);background:var(--surface-inset);font-size:12.5px;line-height:1.3;color:var(--text-secondary)}
+.pair-steps b{display:grid;place-items:center;flex:none;width:20px;height:20px;border-radius:50%;font-size:12px;font-weight:700;border:1px solid var(--line-strong);color:var(--text-secondary);background:var(--surface)}
+.pair-steps li[data-state="current"]{border-color:var(--accent);background:var(--surface-accent);color:var(--text);font-weight:600}
+.pair-steps li[data-state="current"] b{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.pair-steps li[data-state="done"] b{border-color:var(--accent);color:var(--accent-text)}
+.pair-steps-sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+/* Invite side, after the join: this computer's code, to compare with what the other computer shows. */
+.host-code-card{margin:14px 0 16px}
+.host-code-card code{overflow-wrap:anywhere}

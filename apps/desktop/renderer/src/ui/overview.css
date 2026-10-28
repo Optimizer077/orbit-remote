@@ -216,3 +216,39 @@
 .ov-permission-chip.is-granted{border-color:color-mix(in srgb,var(--accent) 34%,var(--line));background:color-mix(in srgb,var(--accent) 8%,var(--surface))}
 .ov-permission-chip.is-granted>svg,.ov-permission-chip.is-granted>small{color:var(--accent-text)}
 .ov-device-revoked{margin:12px 0 0;color:var(--danger-text);font-size:12px;line-height:1.5}
+
+/* First-run actions that carry a full sentence wrap instead of overflowing narrow tiles. */
+.ov-btn.ov-wrap{white-space:normal;text-align:left;line-height:1.35;padding-block:7px;max-width:100%}
+/* First-run direction: two equal choices, neither one presented as the default. */
+.ov-direction-choice{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;width:100%;max-width:560px}
+.ov-direction-choice .ov-btn{justify-content:flex-start;min-height:48px}
+@container ov (max-width:560px){.ov-direction-choice{grid-template-columns:minmax(0,1fr)}}
+
+/* Protection tile: plain headline first; the technical layers stay one click away. */
+.ov-details{font-size:13px;color:var(--text-secondary)}
+.ov-details>summary{cursor:pointer;width:fit-content;font-size:13px;font-weight:600;color:var(--accent-text);border-radius:4px}
+.ov-details>summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.ov-details[open]>summary{margin-bottom:8px}
+.ov-details .ov-details-text{margin-top:8px!important;font-size:12.5px;line-height:1.5;color:var(--text-muted)}
+
+/* Mac permission banner: shown only when a Mac host reports capture or input unavailable. */
+.ov-mac-permissions{display:flex;align-items:flex-start;gap:14px;padding:16px 18px;border-radius:var(--ov-radius);background:var(--warning-surface);border:1px solid var(--warning-line);color:var(--text)}
+.ov-mac-permissions .ov-tile-icon{color:var(--warning-text);background:var(--surface-raised);border-color:var(--warning-line);flex:none}
+.ov-mac-permissions>div{flex:1;min-width:0;display:flex;flex-direction:column;gap:6px}
+.ov-mac-permissions h2{font-size:15px;font-weight:600;line-height:1.35;color:var(--text)}
+.ov-mac-permissions p{font-size:13px;color:var(--text-secondary)}
+.ov-mac-permission-state{display:flex;flex-wrap:wrap;gap:4px 16px;margin:0;padding:0;list-style:none;font-size:12.5px;color:var(--warning-text)}
+.ov-mac-permissions>.ov-btn{flex:none;align-self:center}
+/* Stays focusable while the native setup sheet is open; it just ignores clicks. */
+.ov-mac-permissions>.ov-btn[aria-disabled="true"]{opacity:.6;cursor:progress;transform:none}
+@container ov (max-width:640px){.ov-mac-permissions{flex-wrap:wrap}.ov-mac-permissions>.ov-btn{align-self:flex-start;margin-left:46px}}
+
+/* First run: step 1 shows this computer's real Tailscale state, with the exact fix beside it. */
+.ov-steps li.ov-step-tailscale{align-items:flex-start}
+.ov-step-tailscale[data-state="done"]>b{color:var(--accent-ink);background:var(--accent);border-color:var(--accent)}
+.ov-step-tailscale[data-state="needed"]>b{color:var(--ov-warn);background:var(--warning-surface);border-color:var(--warning-line)}
+.ov-step-body{display:flex;flex-direction:column;align-items:flex-start;gap:6px;min-width:0}
+.ov-step-body>span{padding-top:1px}
+.ov-step-fix{margin:0;font-size:13px;line-height:1.5;color:var(--text-secondary);max-width:52ch}
+/* Device cards: Connect is the one primary action; View only stays a smaller alternative. */
+.ov-device-actions .ov-connect{flex:1 1 auto;min-height:40px;font-size:14px}

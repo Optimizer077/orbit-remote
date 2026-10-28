@@ -13,13 +13,17 @@ BRAND = Path(__file__).resolve().parent
 ICONS = ROOT / "apps" / "desktop" / "build" / "icons"
 ICONS.mkdir(parents=True, exist_ok=True)
 
-MINT = "#b2e6c5"
-PAPER = "#f4f3ee"
-INK = "#243329"
-BLUE = "#aecaff"
+# Colours come from the Daylight and Graphite theme tokens in apps/desktop/renderer/src/styles.css.
+TEAL = "#2dd4bf"       # Daylight sidebar accent: the mark on dark and navy surfaces
+TEAL_DEEP = "#008577"  # Daylight accent: the mark on light surfaces
+NAVY = "#0b1d3a"       # Daylight sidebar: app tile top, wordmark ink on light surfaces
+NAVY_DEEP = "#070b14"  # Graphite sidebar: app tile bottom
+PAPER = "#f4f7fb"      # Graphite text: wordmark ink on dark surfaces
+INK = NAVY
+BLUE = "#aecaff"       # Midnight variant
 
 
-def motif(color=MINT, stroke=25):
+def motif(color=TEAL, stroke=25):
     return f'''<g fill="none" stroke="{color}" stroke-width="{stroke}">
     <circle cx="512" cy="512" r="220"/>
     <ellipse cx="512" cy="512" rx="330" ry="122" transform="rotate(-32 512 512)"/>
@@ -29,22 +33,28 @@ def motif(color=MINT, stroke=25):
 
 
 def svg(content, viewbox, title):
-    return f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="{viewbox}" role="img" aria-labelledby="title">
+    text = f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="{viewbox}" role="img" aria-labelledby="title">
   <title id="title">{title}</title>
   {content}
 </svg>
 '''
+    return "\n".join(line.rstrip() for line in text.split("\n"))
 
 
-app_svg = svg('''<defs>
+def write(path, text):
+    # LF on every platform, matching .gitattributes.
+    path.write_text(text, encoding="utf-8", newline="\n")
+
+
+app_svg = svg(f'''<defs>
     <linearGradient id="surface" x1="0" y1="0" x2="0" y2="1">
-      <stop stop-color="#20382f"/><stop offset="1" stop-color="#101521"/>
+      <stop stop-color="{NAVY}"/><stop offset="1" stop-color="{NAVY_DEEP}"/>
     </linearGradient>
   </defs>
   <rect x="48" y="48" width="928" height="928" rx="222" fill="url(#surface)"/>
   ''' + motif(), "0 0 1024 1024", "Orbit Remote app icon")
-(ICONS / "icon.svg").write_text(app_svg, encoding="utf-8")
-(BRAND / "icon.svg").write_text(app_svg, encoding="utf-8")
+write(ICONS / "icon.svg", app_svg)
+write(BRAND / "icon.svg", app_svg)
 
 # Original geometric lowercase wordmark: orbit. No font is redistributed.
 word_paths = '''<circle cx="220" cy="70" r="29"/>
@@ -70,10 +80,10 @@ def logo(ink, accent):
   ''', "0 0 550 160", "Orbit Remote")
 
 
-for filename, ink, accent in [("logo.svg", PAPER, MINT), ("logo-dark.svg", PAPER, MINT), ("logo-light.svg", INK, "#286647"), ("logo-midnight.svg", PAPER, BLUE)]:
-    (BRAND / filename).write_text(logo(ink, accent), encoding="utf-8")
-for filename, color in [("mark.svg", MINT), ("mark-light.svg", "#286647"), ("mark-midnight.svg", BLUE)]:
-    (BRAND / filename).write_text(svg(motif(color), "140 140 744 744", "Orbit Remote orbital mark"), encoding="utf-8")
+for filename, ink, accent in [("logo.svg", PAPER, TEAL), ("logo-dark.svg", PAPER, TEAL), ("logo-light.svg", INK, TEAL_DEEP), ("logo-midnight.svg", PAPER, BLUE)]:
+    write(BRAND / filename, logo(ink, accent))
+for filename, color in [("mark.svg", TEAL), ("mark-light.svg", TEAL_DEEP), ("mark-midnight.svg", BLUE)]:
+    write(BRAND / filename, svg(motif(color), "140 140 744 744", "Orbit Remote orbital mark"))
 
 
 def rgb(value):
@@ -86,19 +96,19 @@ def surface(image, scale, rim=0):
     ImageDraw.Draw(mask).rounded_rectangle([48 * scale, 48 * scale, 976 * scale, 976 * scale], radius=222 * scale, fill=255)
     gradient = Image.new("RGBA", (length, length))
     rows = []
-    start, end = rgb("#20382f"), rgb("#101521")
+    start, end = rgb(NAVY), rgb(NAVY_DEEP)
     for y in range(length):
         t = y / max(1, length - 1)
         rows.extend([tuple(round(a + (b - a) * t) for a, b in zip(start, end)) + (255,)] * length)
     gradient.putdata(rows)
     image.paste(gradient, (0, 0), mask)
     if rim:
-        # A faint mint edge keeps the dark tile visible on dark taskbars.
+        # A faint teal edge keeps the dark tile visible on dark taskbars.
         ImageDraw.Draw(image).rounded_rectangle([48 * scale, 48 * scale, 976 * scale, 976 * scale], radius=222 * scale,
-                                                outline=rgb(MINT) + (70,), width=max(1, round(rim)))
+                                                outline=rgb(TEAL) + (70,), width=max(1, round(rim)))
 
 
-def raster(size=1024, background=True, color=MINT):
+def raster(size=1024, background=True, color=TEAL):
     # Supersampling keeps the geometric strokes and round corners crisp; optical() handles <= 48px.
     factor = 3 if size >= 512 else 4
     length = size * factor
@@ -126,7 +136,7 @@ def raster(size=1024, background=True, color=MINT):
 OPTICAL = {16: (1.3, 85, False, False), 24: (1.45, 55, True, False), 32: (1.7, 55, True, True), 48: (2.1, 65, True, True)}
 
 
-def optical(size, background=True, color=MINT):
+def optical(size, background=True, color=TEAL):
     stroke, node, circle, satellite = OPTICAL[size]
     factor = 8
     length = size * factor
@@ -173,14 +183,14 @@ for size, name in [(16, "trayTemplate.png"), (32, "trayTemplate@2x.png")]:
     optical(size, background=False, color="#000000").save(ICONS / name)
 
 # A compact contact sheet makes native icon sizes easy to review.
-sheet = Image.new("RGB", (1000, 420), "#101616")
+sheet = Image.new("RGB", (1000, 420), "#0f1522")
 sheet.paste(app.resize((320, 320), Image.Resampling.LANCZOS), (45, 50), app.resize((320, 320), Image.Resampling.LANCZOS))
 draw = ImageDraw.Draw(sheet)
-draw.text((413, 59), "ORBIT REMOTE / NATIVE ICON SYSTEM", fill=MINT)
+draw.text((413, 59), "ORBIT REMOTE / NATIVE ICON SYSTEM", fill=TEAL)
 for x, size in zip([420, 578, 690, 783, 854, 915], [128, 64, 48, 32, 24, 16]):
     tile = optical(size) if size in OPTICAL else raster(size)
     sheet.paste(tile, (x, 140 + (128 - size) // 2), tile)
-    draw.text((x, 294), str(size) + "px", fill="#c7d5bd")
-draw.text((413, 355), "Mint / orbital ring / connected node / optical sizes at 48px and below", fill="#9aa98f")
+    draw.text((x, 294), str(size) + "px", fill="#d2d9e5")
+draw.text((413, 355), "Teal on navy / orbital ring / connected node / optical sizes at 48px and below", fill="#aab4c6")
 sheet.save(BRAND / "icon-preview.png")
 print(f"Created vector marks and app/tray icons in {ICONS}")

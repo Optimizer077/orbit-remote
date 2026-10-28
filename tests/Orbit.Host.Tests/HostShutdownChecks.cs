@@ -35,11 +35,12 @@ public static class HostShutdownChecks
         var peers = new List<PairedDevice>(); var sessions = new Dictionary<string, RemoteSession>();
         for (var i = 0; i < 4; i++)
         {
-            var invite = state.CreateInvite(new("Generated", new(View: true)), "https://127.0.0.1:1", "generated-pin");
+            // Viewing sessions leave one host slot for a controller, so the eighth stream is a control session.
+            var invite = state.CreateInvite(new("Generated", new(View: true, Control: i == 3)), "https://127.0.0.1:1", "generated-pin");
             var encoded = invite.InviteUri["orbit://pair/".Length..].Replace('-', '+').Replace('_', '/');
             using var payload = JsonDocument.Parse(Convert.FromBase64String(encoded.PadRight((encoded.Length + 3) / 4 * 4, '=')));
             var peer = state.Pair(new(payload.RootElement.GetProperty("secret").GetString()!, "Generated"), "generated-peer-" + i); peers.Add(peer);
-            for (var j = 0; j < 2; j++) { var session = state.StartSession(peer, null, viewOnly: true); sessions.Add(session.Id, session); }
+            for (var j = 0; j < 2; j++) { var session = state.StartSession(peer, null, viewOnly: !(i == 3 && j == 1)); sessions.Add(session.Id, session); }
         }
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions { Args = [] });
         builder.Logging.ClearProviders(); builder.WebHost.UseUrls("http://127.0.0.1:0");

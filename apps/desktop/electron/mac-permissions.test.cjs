@@ -45,3 +45,30 @@ test('accessibility request requires the selected native dialog action', async (
   assert.deepEqual(calls[1], ['accessibility', true]);
   assert.deepEqual(calls[2], ['settings', 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility']);
 });
+
+test('a second request while the sheet is open joins it instead of stacking another sheet', async () => {
+  const calls = []; let answer;
+  const show = createMacPermissionSetup({
+    dialog: { showMessageBox: async options => { calls.push(options); return new Promise(resolve => { answer = resolve; }); } },
+    getHostStatus: async () => ({ platform: { canCapture: false, canInput: false } }),
+    desktopCapturer: { getSources: async () => [] }, systemPreferences: {}, shell: { openExternal: async () => undefined },
+  });
+  const first = show('menu'), second = show('banner');
+  assert.equal(first, second);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.length, 1);
+  answer({ response: 4 }); await first;
+  const third = show('banner'); await new Promise(resolve => setImmediate(resolve));
+  assert.notEqual(third, first); assert.equal(calls.length, 2, 'a new sheet can open after the first one closes');
+  answer({ response: 4 }); await third;
+});
+
+test('a failed sheet releases the guard so the next request can open', async () => {
+  let fail = true; const calls = [];
+  const show = createMacPermissionSetup({
+    dialog: { showMessageBox: async () => { calls.push(1); if (fail) throw new Error('generated failure'); return { response: 4 }; } },
+    getHostStatus: async () => ({ platform: {} }), desktopCapturer: {}, systemPreferences: {}, shell: {},
+  });
+  await assert.rejects(show(), /generated failure/);
+  fail = false; await show(); assert.equal(calls.length, 2);
+});

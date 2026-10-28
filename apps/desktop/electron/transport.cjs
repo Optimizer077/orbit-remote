@@ -1,5 +1,6 @@
 'use strict';
 const { IDENTITY_TERMINAL, IDENTITY_CHANGED_MESSAGE } = require('./security-terminal.cjs');
+const { neutralText } = require('./peer-data.cjs');
 const https = require('node:https');
 const http = require('node:http');
 const tls = require('node:tls');
@@ -196,7 +197,8 @@ function request(options) {
           try { json = JSON.parse(buffer.toString('utf8')); } catch { return reject(new Error('Device returned invalid JSON.')); }
         }
         if (response.statusCode < 200 || response.statusCode >= 300) {
-          const error = new Error(json?.error || json?.message || 'Device request failed (' + response.statusCode + ').');
+          // Remote error text is shown to people: bounded, with unsafe characters neutralised.
+          const error = new Error(neutralText(json?.error) || neutralText(json?.message) || 'Device request failed (' + response.statusCode + ').');
           error.status = response.statusCode;
           Object.assign(error, remoteErrorMetadata(json, response.statusCode, response.headers));
           return reject(error);
@@ -288,7 +290,7 @@ function remoteStream(device, identity, route, options = {}, allowLoopback = fal
         response.on('data', chunk => { bytes += chunk.length; if (bytes <= MAX_STREAM_ERROR_BYTES) chunks.push(chunk); else response.destroy(); });
         response.on('close', () => {
           let json; try { json = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { /* bodies are optional */ }
-          const error = Object.assign(new Error(json?.error || 'Device stream request failed (' + response.statusCode + ').'),
+          const error = Object.assign(new Error(neutralText(json?.error) || 'Device stream request failed (' + response.statusCode + ').'),
             { status: response.statusCode }, remoteErrorMetadata(json, response.statusCode, response.headers));
           settled = true; agent.destroy(); reject(error);
         });

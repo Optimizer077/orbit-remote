@@ -13,13 +13,23 @@ public static class SessionIsolationChecks
         RejectLimit(() => limits.StartSession(viewers[0], null), "This device has reached its limit of 2", "One view-only device cannot consume all eight host slots");
         check(limits.StartSession(viewers[1], null).DeviceId == viewers[1].Id, "Another approved device retains access after one device reaches its cap");
         limits.StartSession(viewers[1], null);
-        foreach (var device in viewers.Skip(2).Take(2)) { limits.StartSession(device, null); limits.StartSession(device, null); }
-        check(limits.Sessions.Length == 8, "The existing host-wide eight-session capacity remains available across devices");
+        limits.StartSession(viewers[2], null); limits.StartSession(viewers[2], null);
+        limits.StartSession(viewers[3], null);
+        check(limits.Sessions.Length == HostState.MaximumSessions - 1, "Viewing sessions from several devices fill all but one host slot");
+        // H-4: four paired viewers must not be able to lock the controller out.
+        RejectLimit(() => limits.StartSession(viewers[3], null), "The host has reached its session limit", "Viewing sessions cannot take the host slot reserved for a controller");
+        var controllerDevice = Pair(limits, "controller-reserved", true);
+        check(limits.StartSession(controllerDevice, null).Permissions.Control && limits.Sessions.Length == HostState.MaximumSessions,
+            "A control session can still start when viewers hold every other host slot");
         RejectLimit(() => limits.StartSession(viewers[4], null), "The host has reached its session limit", "Host-wide cap still applies across distinct devices");
         check(limits.EndSession(first.Id, viewers[0].Id), "An owned session can release a device and host slot");
         check(limits.StartSession(viewers[4], null).DeviceId == viewers[4].Id, "A different device may use the released host slot");
         clock.Advance(TimeSpan.FromSeconds(31));
         check(limits.StartSession(viewers[0], null).DeviceId == viewers[0].Id && limits.Sessions.Length == 1, "Expired sessions free both per-device and host capacity");
+        var viewOnlyController = Pair(limits, "controller-viewing", true);
+        foreach (var device in viewers.Skip(1).Take(3)) { limits.StartSession(device, null); limits.StartSession(device, null); }
+        RejectLimit(() => limits.StartSession(viewOnlyController, null, viewOnly: true), "The host has reached its session limit",
+            "A view-only session of a control-capable device counts as viewing and cannot take the reserved slot");
 
         var isolation = new HostState(Path.Combine(tempRoot, "session-input-isolation"));
         var controller = Pair(isolation, "controller", true);

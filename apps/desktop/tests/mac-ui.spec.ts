@@ -35,7 +35,7 @@ test('Mac UI v2: native appearance, Cmd+K, Retina HUD, popouts and menu template
       window.show(); app.focus({ steal: true }); window.focus();
     });
     await invoke('settings.update', { hostName: 'Orbit Mac UI test' });
-    await page.getByRole('button', { name: 'Refresh host and check device availability', exact: true }).click();
+    await page.getByRole('button', { name: 'Refresh and check which computers are online', exact: true }).click();
     await expect(page.locator('.local-user strong')).toHaveText('Orbit Mac UI test');
     await fs.mkdir(snapshots, { recursive: true });
     await fs.rm(path.join(snapshots, 'native-menu-icon.png'), { force: true });
@@ -71,7 +71,7 @@ test('Mac UI v2: native appearance, Cmd+K, Retina HUD, popouts and menu template
     const invite = await invoke<any>('invite.create', { deviceName: 'Mac UI controller',
       permissions: { view: true, control: true, clipboard: false, files: false, power: false } });
     await invoke('pair', { invite: invite.invite });
-    await page.getByRole('button', { name: 'Refresh host and check device availability', exact: true }).click();
+    await page.getByRole('button', { name: 'Refresh and check which computers are online', exact: true }).click();
     await page.keyboard.press('Meta+k');
     await expect(palette).toBeVisible();
     await page.locator('[data-command-palette-input]').fill('Connect to Orbit Mac UI test');

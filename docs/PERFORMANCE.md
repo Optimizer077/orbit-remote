@@ -18,8 +18,8 @@ Every stream result here comes from one Windows PC. Click-to-screen latency and 
 1. **Capture.** The host duplicates the chosen monitor on that monitor's GPU (DXGI Desktop Duplication). An unchanged screen produces no new frame.
 2. **Encode.** The GPU's H.264 encoder, reached through Windows Media Foundation, runs in low-latency mode with no B-frames. Keyframes are sent when a viewer joins or asks for one.
 3. **Send.** One long-lived request on the pinned mutual-TLS listener carries a sequence of stream records: configuration, video, cursor, and a final record that says why the stream ended. The host keeps at most 8 unacknowledged frames, and at most about 100 ms of the target bitrate, in flight. When the link can't keep up, it skips capture and encoding instead of queueing old frames, so the frame rate drops and latency stays bounded.
-4. **Decode.** The viewer decodes with WebCodecs. Chromium backs it with D3D11VA on Windows, VideoToolbox on macOS, and VA-API on Linux. If 12 frames are already waiting to be decoded, or the oldest has waited more than 500 ms, the viewer resets the decoder, keeps the last picture on screen, and asks for a keyframe.
-5. **Present.** Each decoded frame is drawn to a canvas and released right away. The viewer draws the pointer itself from cursor shapes the host sends separately.
+4. **Decode.** The viewer decodes with WebCodecs. Chromium backs it with D3D11VA on Windows, VideoToolbox on macOS, and VA-API on Linux; if no hardware decoder accepts the stream, or the hardware decoder fails before its first frame, the software decoder takes over. Connection details shows *Hardware* only after a hardware-only decoder has produced a frame, *Software* for the software decoder, and *Not confirmed* otherwise. The main process keeps at most three records on their way to the decoder. If 12 frames are already waiting to be decoded, or the oldest has waited more than 500 ms, the viewer resets the decoder, keeps the last picture on screen, and asks for a keyframe.
+5. **Present.** Every frame is decoded, but at most two are drawn per display refresh. A decoded frame is drawn at once when nothing newer is still in the decoder or waiting to enter it and no frame was drawn at once yet in this refresh; otherwise it waits for the next refresh, where only the newest waiting frame is drawn. A burst's last frame is therefore drawn as soon as it is decoded. Decoders that keep several frames queued (Windows on ARM) wait at most one refresh. Replaced frames are released immediately and counted apart from dropped frames, so they do not lower the smoothness rating. The viewer draws the pointer itself from cursor shapes the host sends separately.
 
 **Fallback.** If the host can't stream video, or the stream fails, the viewer asks for single images and retries video automatically. Images travel over reused pinned connections as binary frames. Windows hosts send PNG or JPEG, whichever is smaller, and can also send smaller images and skip unchanged ones ([image fallback](#image-fallback)).
 
@@ -48,6 +48,28 @@ The stage times add up to about 11–13 ms per frame at 3024×1898, plus network
 | Synthetic, one viewer | 3601 of 3601 frames drawn in 60 s, 60.0 fps; frame interval p95 17.7 ms | A generated 60 fps test source through the full pipeline on one PC |
 | Synthetic, two viewers | Both viewers held 60 fps | The same test with two viewers at once |
 
+### Viewer presentation
+
+Measured on 2026-10-28 for the credit window of three and newest-frame presentation described above.
+
+| Delivery | p95 from parsed frame to canvas draw | Dropped | Method |
+|---|---|---:|---|
+| Paced, 60 fps | 1.3 ms, against 1.2–1.6 ms for the previous code (equal within noise) | 0 | An Electron 45 bench: generated content encoded with the browser's software H.264 encoder, replayed through the real stream client, decoder Worker and canvas; old and new code run in interleaved pairs |
+| Burst (three frames at once every third interval) | 0.2–0.8 ms above the previous code (gate: at most +1 ms) | 0 | Same bench |
+
+In burst delivery fewer frames are drawn per second than before, because frames replaced before the next refresh are skipped by design; they are still decoded and are counted as replaced, not dropped. The bench stops at the canvas draw, not at the display; the hop from the main process to the window is simulated; and the machine was shared with other work. Details: [RESULTS.md](RESULTS.md#viewer-presentation-bench).
+
+### Bitrate on very noisy content (in development)
+
+A safety net for content that overshoots the bitrate target is in development and **not merged**. Component measurements of the host's stream loop and GPU encoder alone, without a viewer or network, on the NVIDIA RTX 5060 Ti x64 PC (1920×1280 generated source, 60 fps, 8 Mbit/s target, 60-second window), 2026-10-27:
+
+| Content | Without the safety net | With the safety net |
+|---|---|---|
+| Full-frame noise | 688.5 Mbit/s mean (encoder only) | 7.98 Mbit/s mean, 8.27 Mbit/s highest 1 s; under 150 % of the target 2 s after the first over-budget window; reduced to QP 51 at one third of the size |
+| Low-entropy pattern | 1.079 Mbit/s mean, 59.98 frames per second (encoder only) | 1.08 Mbit/s mean, 60.0 frames per second; the safety net never stepped in |
+
+The opening keyframe on noisy content (about 1.44 MB) is still over the keyframe budget, and image quality has not been measured yet. These are not end-to-end viewer results. Details: [RESULTS.md](RESULTS.md#bitrate-safety-net-native-component-results).
+
 ### Recovery
 
 | Event | Time | Notes |
@@ -62,14 +84,15 @@ The stage times add up to about 11–13 ms per frame at 3024×1898, plus network
 - **Synthetic source versus live desktop.** The synthetic source produces a known animation at 60 fps, so every frame can be counted: 3601 of 3601 means none was lost. It is simple content that compresses well, so it says little about bitrate on busy screens. The live run used whatever was on the desktop; content was not controlled, and a different screen would give different sizes.
 - **One PC.** Host and viewer ran on the same computer. The runs exclude real network latency, bandwidth limits, packet loss, and Tailscale relays.
 - **Stage timings** come from separate measurements of each stage. They show where time goes; they are not a latency measurement.
+- **Viewer timing in Connection details.** For video, the viewer keeps the last two seconds (at most 240 frames) of per-frame timings and reports p50/p95/p99. *Viewer pipeline* is the sum of two durations, each timed on its own clock: from the frame's arrival stamp in the viewer window to its hand-off to the decoder Worker, and from the Worker receiving it to the draw on the canvas, including any wait for the display refresh. The hop from window to Worker is not measured. Within the Worker, *decode* runs from the `VideoDecoder.decode()` call to the decoded frame, so it includes the decoder's internal queue, which WebCodecs does not expose separately; the wait before that call is reported on its own. The main process separately reports how long a parsed frame waited for decoder credit before it was posted to the window. The hop from main to the renderer, and any wait in the renderer's task queue before the arrival stamp, are not measured. *Control round trip* is the time from sending one of this app's existing stream control (acknowledgement) requests to receiving its response, in the main process: it includes host request handling, connection setup or socket wait on the pooled connection, and main event-loop delay, so its minimum is the best estimate of the link round trip. None of these includes host capture, encoding, or one-way network time. No timestamp is subtracted across processes, across the window and the Worker, or from host timestamps.
 
 ### Not measured yet
 
-- **Click-to-screen latency.** This needs an instrumented loop or a high-speed recording with a documented method.
+- **Click-to-screen latency.** This needs an instrumented loop or a high-speed recording with a documented method. The viewer pipeline and round-trip figures in Connection details cover only part of it (see the method notes).
 - **Video between two computers.** Windows-generated video has reached a Mac viewer ([Mac handoff](MACOS.md)), but sustained cross-device playback, direct versus relayed paths, and lossy links have not been measured.
 - **AMD and Intel encoders.** Only an NVIDIA hardware encoder has been measured.
 - **Mac and Linux hosts.** They have no video stream and send images. Hardware decode on a Linux viewer is untested.
-- **Busy screens.** Very busy or noisy content can exceed the bitrate target.
+- **Busy screens.** Very busy or noisy content can exceed the bitrate target. The safety net above is measured only as a component; its effect on image quality and on a real viewer is not measured.
 - **Long runs, several monitors, and resource use** (CPU, GPU, memory) over time.
 
 Targets, set against published figures from leading tools: 1080p60 on a LAN; ≤ 10–16 ms added LAN latency (Parsec reports 7 ms); at 1 % loss no freeze longer than 100 ms; text as sharp as 4:4:4. These are targets, not results.

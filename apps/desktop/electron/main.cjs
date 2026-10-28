@@ -13,7 +13,9 @@ const { NativeWindowVisibility, OwnerFrameGate } = require('./viewer-visibility.
 const { NativeWindowFullscreen, fullscreenRequest } = require('./fullscreen-state.cjs');
 const { createMacPermissionSetup } = require('./mac-permissions.cjs');
 const { ChildProofAgent, findTailscaleCli } = require('./local-control.cjs');
-const { HostSupervisor, NetworkChangeTracker, tailscaleObservation, BoundedHostLog, IdentityRotationGuard } = require('./host-supervisor.cjs');
+const { hostEnvironment } = require('./host-environment.cjs');
+const { isReleaseBuild, launchDecision, refusalMessage, noSandboxWarning, testSettings } = require('./launch-policy.cjs');
+const { HostSupervisor, NetworkChangeTracker, tailscaleObservation, BoundedHostLog, IdentityRotationGuard, retryStep, retryRefusal, pairedDevicesSignature } = require('./host-supervisor.cjs');
 
 let mainWindow, tray, hostProcess, controller, showMacPermissionSetup;
 const viewerWindows = new Map();
@@ -30,13 +32,23 @@ const viewerActions = new Set(['viewer.context', 'viewer.close', 'session.monito
 let quitting = false;
 let restartTimer, healthTimer, healthBusy = false, lastProbeAt = 0, healthFailures = 0;
 let lastIdentity = null, lastUiStatus = null, hostDirectory;
+// The last raw host status from the health probe (cleared on each start) and
+// the time of the last owner-requested restart, for the Retry guard.
+let lastRawStatus = null, lastManualRestartAt = null;
 const identityRotation = new IdentityRotationGuard();
 const supervisor = new HostSupervisor();
 const networkChanges = new NetworkChangeTracker();
 const appRoot = path.resolve(__dirname, '..');
 const workspaceRoot = path.resolve(appRoot, '..', '..');
-const controlPort = Number(process.env.ORBIT_CONTROL_PORT || 47831);
-const allowLoopback = process.env.ORBIT_LOOPBACK_TEST === '1';
+// An installed release ignores test switches from the environment and refuses Chromium debug and
+// sandbox switches. The unfused end-to-end test build is marked at package time and keeps both.
+const releaseBuild = isReleaseBuild(app.isPackaged, require('../package.json'));
+const testing = testSettings(process.env, releaseBuild);
+const launch = releaseBuild ? launchDecision({ argv: process.argv, hasSwitch: name => app.commandLine.hasSwitch(name),
+  platform: process.platform, environment: process.env }) : { refused: [], warnings: [] };
+const refusedLaunch = launch.refused;
+const controlPort = testing.controlPort;
+const allowLoopback = testing.loopbackTest;
 // An installed build never loads its privileged UI from a dev server named by the environment.
 const rendererUrl = app.isPackaged ? undefined : process.env.ORBIT_RENDERER_URL;
 const isDevUrl = value => {
@@ -46,10 +58,17 @@ const isDevUrl = value => {
 if (rendererUrl && !isDevUrl(rendererUrl)) throw new Error('Development renderer must use http://127.0.0.1:5173.');
 const entryFile = path.join(appRoot, 'dist', 'index.html');
 
+// A refused launch exits before any window, profile lock or host start.
 // Isolate development/tests before Chromium creates caches or acquires its lock.
 // Normal launches retain the per-user application directory and single instance.
-if (process.env.ORBIT_APP_DATA) app.setPath('userData', path.resolve(process.env.ORBIT_APP_DATA));
-if (!app.requestSingleInstanceLock()) app.quit();
+if (testing.appData && !refusedLaunch.length) app.setPath('userData', path.resolve(testing.appData));
+if (refusedLaunch.length) {
+  // Visible as well as logged: showErrorBox works before ready (on Linux it writes to stderr instead).
+  const refusal = refusalMessage(refusedLaunch);
+  console.error(refusal.message);
+  dialog.showErrorBox(refusal.title, refusal.message);
+  app.exit(1);
+} else if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on('second-instance', () => { mainWindow?.show(); mainWindow?.focus(); });
   app.whenReady().then(start).catch(async error => {
@@ -61,7 +80,7 @@ else {
 }
 
 function startHost(dataDirectory) {
-  supervisor.started(); healthFailures = 0; networkChanges.reset();
+  supervisor.started(); healthFailures = 0; networkChanges.reset(); lastRawStatus = null;
   controller.clearLocalControl();
   const controlToken = crypto.randomBytes(32).toString('base64url');
   const proofKey = crypto.randomBytes(32).toString('base64url');
@@ -75,8 +94,7 @@ function startHost(dataDirectory) {
   if (allowLoopback) args.push('--loopback-test');
   const child = spawn(executable, args, {
     cwd: app.isPackaged ? path.dirname(published) : appRoot, windowsHide: true,
-    env: { ...process.env, ORBIT_CONTROL_TOKEN: controlToken, ORBIT_DATA_DIR: path.join(dataDirectory, 'host'),
-      ORBIT_CONTROL_PORT: String(controlPort), ORBIT_PARENT_WATCH: '1', ORBIT_PARENT_PROOF: '1' },
+    env: hostEnvironment(process.env, { packaged: app.isPackaged, release: releaseBuild, controlToken, dataDirectory: path.join(dataDirectory, 'host'), controlPort }),
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   hostProcess = child;
@@ -134,18 +152,26 @@ function stopForRecovery(reason, manual = false) {
   force.unref(); child.once('exit', () => clearTimeout(force));
 }
 function retryHost() {
-  if (!supervisor.canRetry()) return runtimeStatus();
+  // Also reached from the "Tailscale is on now" action: an offline host only
+  // detects Tailscale when it starts, so the same local restart applies.
+  const state = supervisor.snapshot().state, now = Date.now();
+  const recheckingTailscale = state === 'offline';
+  const step = retryStep(supervisor.canRetry(), hostProcess);
+  if (step === 'none') return runtimeStatus();
+  const refused = retryRefusal({ state, rawStatus: lastRawStatus, rotationInFlight: identityRotation.inFlight, lastManualAt: lastManualRestartAt, now });
+  if (refused) return { ...runtimeStatus(), retryRefused: refused };
+  lastManualRestartAt = now;
   clearTimeout(restartTimer); restartTimer = null;
   supervisor.retry(Date.now()); notifyRuntimeChanged();
-  if (hostProcess?.exitCode === null && !hostProcess.orbitStopping) stopForRecovery('Retry requested locally.', true);
-  else if (hostProcess?.exitCode === null) hostProcess.orbitManualRestart = true;
+  if (step === 'stop') stopForRecovery(recheckingTailscale ? 'Checking for Tailscale again.' : 'Retry requested locally.', true);
+  else if (step === 'mark') hostProcess.orbitManualRestart = true;
   else startHost(hostDirectory);
   return runtimeStatus();
 }
 
 async function start() {
   app.setAppUserModelId('dev.orbit.remote');
-  const directory = process.env.ORBIT_APP_DATA || app.getPath('userData');
+  const directory = testing.appData || app.getPath('userData');
   hostDirectory = directory;
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   controller = new OrbitController({
@@ -191,7 +217,7 @@ async function start() {
   });
   startHost(directory);
   for (let attempt = 0; attempt < 80; attempt++) {
-    try { const status = await controller.local('status'); lastIdentity = status.identity || null; supervisor.healthy(Date.now(), status.remoteEnabled); break; }
+    try { const status = await controller.local('status'); lastRawStatus = status; lastIdentity = status.identity || null; supervisor.healthy(Date.now(), status.remoteEnabled); break; }
     catch { await new Promise(resolve => setTimeout(resolve, 250)); }
   }
   // Failed hosts still get an owner UI with a terminal Retry action instead of
@@ -228,6 +254,12 @@ async function start() {
       if (action.startsWith('viewer.')) throw new Error('This action is only available inside a screen window.');
       if (action === 'host.runtime') return runtimeStatus();
       if (action === 'host.retry') return retryHost();
+      // Opens the same native Mac permission setup as the app menu. It requests
+      // nothing by itself: each macOS prompt still needs a button in that dialog.
+      if (action === 'app.mac-permissions') {
+        if (!showMacPermissionSetup) throw new Error('Permission setup is only available on a Mac.');
+        await showMacPermissionSetup(mainWindow); return { ok: true };
+      }
       if (action === 'identity.rotate') {
         return identityRotation.run(payload, {
           getStatus: () => controller.local('status'),
@@ -372,6 +404,9 @@ async function start() {
   });
   session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
   session.defaultSession.setPermissionCheckHandler(() => false);
+  // On the bundled file:// page, 'self' matches every file: URL, and a CSP source cannot narrow file: to one
+  // folder. The other protections (no HTML sinks, sandbox, IPC sender checks) carry that gap until the renderer
+  // moves to a custom protocol with its own origin.
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
     const csp = rendererUrl ? "default-src 'self'; script-src 'self' 'unsafe-inline'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws://127.0.0.1:5173; object-src 'none'; frame-src 'none'" :
       "default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'";
@@ -379,6 +414,7 @@ async function start() {
   });
   createWindow();
   createTray();
+  if (launch.warnings.includes('no-sandbox')) warnNoSandboxOnce(directory);
   const loginLaunch = process.platform === 'darwin' && app.getLoginItemSettings().wasOpenedAtLogin;
   if (!process.argv.includes('--background') && !loginLaunch) mainWindow.show();
   healthTimer = setInterval(async () => {
@@ -388,7 +424,7 @@ async function start() {
       const status = await controller.local('status');
       if (hostProcess?.orbitStopping) return;
       observeIncoming(status);
-      lastIdentity = status.identity || null; healthFailures = 0;
+      lastRawStatus = status; lastIdentity = status.identity || null; healthFailures = 0;
       supervisor.healthy(Date.now(), status.remoteEnabled);
       const tailscaleCli = findTailscaleCli();
       if (!allowLoopback && !status.identity?.expired && tailscaleCli && Date.now() - lastProbeAt >= 10000) {
@@ -410,15 +446,30 @@ async function start() {
   }, 3000);
 }
 
-let incomingSignature = '';
+let incomingSignature = '', pairedSignature;
 function observeIncoming(status) {
   const incoming = (status?.sessions || []).filter(s => s.direction !== 'outgoing');
   const signature = JSON.stringify(incoming.map(s => [s.id, s.permissions?.control === true]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
   updateTrayActivity(trayActivityFromStatus(status));
-  if (signature !== incomingSignature) {
+  // A new or revoked pairing also refreshes the owner window, e.g. an open
+  // invite dialog showing that the other computer joined.
+  const paired = pairedDevicesSignature(status);
+  const pairingChanged = paired !== undefined && pairedSignature !== undefined && paired !== pairedSignature;
+  if (paired !== undefined) pairedSignature = paired;
+  if (signature !== incomingSignature || pairingChanged) {
     incomingSignature = signature;
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('orbit:incoming-changed');
   }
+}
+
+// AppImage on Linux only (launch-policy.cjs): logged on every launch, shown once per profile.
+function warnNoSandboxOnce(directory) {
+  const warning = noSandboxWarning();
+  console.warn(warning.title + '. ' + warning.message);
+  const marker = path.join(directory, 'no-sandbox-warning-shown');
+  if (fs.existsSync(marker)) return;
+  try { fs.writeFileSync(marker, new Date().toISOString() + '\n', { mode: 0o600 }); } catch { /* Warn again next time. */ }
+  void dialog.showMessageBox({ type: 'warning', title: warning.title, message: warning.title, detail: warning.message, buttons: ['OK'] });
 }
 
 function createWindow() {
@@ -427,7 +478,7 @@ function createWindow() {
     backgroundColor: '#101615', title: 'Orbit Remote', autoHideMenuBar: true,
     icon: app.isPackaged ? path.join(process.resourcesPath, 'icons', 'icon.png') : path.join(appRoot, 'build', 'icons', 'icon.png'),
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true,
-      sandbox: true, nodeIntegration: false, webSecurity: true, spellcheck: false, backgroundThrottling: false },
+      sandbox: true, nodeIntegration: false, webSecurity: true, spellcheck: false, backgroundThrottling: false, devTools: !releaseBuild },
   });
   Menu.setApplicationMenu(process.platform === 'darwin' ? Menu.buildFromTemplate([
     { label: app.name, submenu: [
@@ -508,7 +559,7 @@ function openViewer(payload) {
     title: s.device.name + ' — ' + (monitor.name || 'Remote screen'),
     icon: app.isPackaged ? path.join(process.resourcesPath, 'icons', 'icon.png') : path.join(appRoot, 'build', 'icons', 'icon.png'),
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true,
-      sandbox: true, nodeIntegration: false, webSecurity: true, spellcheck: false, backgroundThrottling: false },
+      sandbox: true, nodeIntegration: false, webSecurity: true, spellcheck: false, backgroundThrottling: false, devTools: !releaseBuild },
   });
   const id = window.webContents.id;
   viewerWindows.set(id, { window, sessionId: payload.sessionId, monitorId: monitor.id,

@@ -1,15 +1,23 @@
 import { api, type Link } from '../api';
-import { MAX_PENDING_FRAMES } from './decoder-engine';
-const MAX_CLIENT_PENDING = MAX_PENDING_FRAMES + 4;
-import type { CursorState, DecoderOutput, StreamConfig } from './types';
+import { MAX_CLIENT_PENDING, VIDEO_CREDIT_WINDOW } from './decoder-admission';
+import type { CursorState, DecodeMode, DecoderOutput, StreamConfig } from './types';
 import { streamFallback, terminalStreamFailure, type StreamFallbackInfo } from './recovery';
 import { WindowStateTracker, type WindowVisibility } from './window-state';
 
-type Presentation = { sequence: number; timestamp: number; decodeMs: number; drawMs: number; bytes: number };
+type Presentation = { sequence: number; timestamp: number; decodeMs: number; drawMs: number; bytes: number; queueMs?: number; viewerMs?: number; mainQueueMs?: number };
+// Main-process durations ride on record messages; each is measured on main's own clock.
+const mainDuration = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 60000 ? value : undefined;
 type Callbacks = {
   onConfig(config: StreamConfig, sessionGeneration?: number): void;
   onPresented(config: StreamConfig, presentation: Presentation, link?: Link, sessionGeneration?: number): void;
   onReceived?(bytes: number, hostMicros: number): void;
+  /** One stream control round trip timed in main (request sent to response received), measured ageMs before it arrived. */
+  onRoundTrip?(ms: number, ageMs: number): void;
+  onDecodeMode?(mode: DecodeMode): void;
+  /** A decoded frame was replaced by a newer one before display (normal pacing, not a drop). */
+  onSuperseded?(): void;
+  /** Units the decoder discarded and will never display. */
+  onDropped?(count: number): void;
   onCursor?(config: StreamConfig, cursor: CursorState): void;
   onRecovering(): void;
   onEnded(reason: string, canReconnect?: boolean): void;
@@ -36,7 +44,7 @@ export function startVideoStream(canvas: HTMLCanvasElement, sessionId: string, m
     desiredScale = next; pendingScale = next;
     try { sendSettings(); } catch { localFallback('worker_channel_error', 'The video settings channel closed. Using image updates.', true); }
   };
-  const pending = new Map<number, { config: StreamConfig; bytes: number; sessionGeneration?: number }>();
+  const pending = new Map<number, { config: StreamConfig; bytes: number; sessionGeneration?: number; mainQueueMs?: number }>();
   const pauseState = new WindowStateTracker();
   let arrivalTimer: number | undefined;
 
@@ -53,7 +61,7 @@ export function startVideoStream(canvas: HTMLCanvasElement, sessionId: string, m
   const localFallback = (code: string, reason: string, retryable: boolean) => fallback({ code, reason, retryable });
   const forwardCredit = () => {
     if (stopped || !mainPort || !waitingCredit) return;
-    waitingCredit = 0; mainPort.postMessage({ type: 'credit', count: 1 });
+    const count = waitingCredit; waitingCredit = 0; mainPort.postMessage({ type: 'credit', count });
   };
 
   function receivePort(event: MessageEvent) {
@@ -85,7 +93,9 @@ export function startVideoStream(canvas: HTMLCanvasElement, sessionId: string, m
         return;
       }
       if (message?.type !== 'record' || !workerPort) { localFallback('invalid_worker_message', 'The video decoder channel failed. Using image updates.', false); return; }
-      const record = message.record;
+      const record = message.record, arrivedAt = performance.now();
+      const roundTrip = mainDuration(message.rttMs);
+      if (roundTrip !== undefined) callbacks.onRoundTrip?.(roundTrip, mainDuration(message.rttAgeMs) ?? 0);
       try {
         if (record?.type === 'config') {
           sessionGeneration = Number.isSafeInteger(message.sessionGeneration) && message.sessionGeneration >= 0 ? message.sessionGeneration : undefined;
@@ -94,7 +104,9 @@ export function startVideoStream(canvas: HTMLCanvasElement, sessionId: string, m
         } else if (record?.type === 'access-unit' && currentConfig && record.data instanceof ArrayBuffer
           && record.data.byteLength > 0 && record.data.byteLength <= 8 * 1024 * 1024 && pending.size < MAX_CLIENT_PENDING) {
           callbacks.onReceived?.(record.data.byteLength, record.timestamp);
-          pending.set(record.sequence, { config: currentConfig, bytes: record.data.byteLength, sessionGeneration });
+          pending.set(record.sequence, { config: currentConfig, bytes: record.data.byteLength, sessionGeneration, mainQueueMs: mainDuration(message.mainQueueMs) });
+          // Window part only, on this window's clock; the Worker times its own part.
+          record.windowQueueMs = performance.now() - arrivedAt;
           workerPort.postMessage(record, [record.data]);
         } else localFallback('invalid_video_record', 'The video decoder received an invalid record. Using image updates.', false);
       } catch { localFallback('decoder_fault', 'Video decoding failed. Using image updates.', true); }
@@ -116,15 +128,21 @@ export function startVideoStream(canvas: HTMLCanvasElement, sessionId: string, m
       if (stopped) return;
       const message = event.data as DecoderOutput | { type: 'credit'; count: number };
       if (message.type === 'credit') {
-        if (message.count !== 1 || waitingCredit !== 0) { localFallback('invalid_worker_message', 'The video decoder lost synchronization. Using image updates.', false); return; }
-        waitingCredit = 1; forwardCredit(); return;
+        // Credit held here before main's port opens plus credit just returned never exceeds the Worker's window.
+        if (!Number.isInteger(message.count) || message.count < 1 || waitingCredit + message.count > VIDEO_CREDIT_WINDOW) {
+          localFallback('invalid_worker_message', 'The video decoder lost synchronization. Using image updates.', false); return;
+        }
+        waitingCredit += message.count; forwardCredit(); return;
       }
-      if (message.type === 'configured') return;
+      if (message.type === 'configured') { callbacks.onDecodeMode?.(message.decodeMode); return; }
       if (message.type === 'presented') {
         const sample = pending.get(message.sequence);
-        if (sample) { pending.delete(message.sequence); callbacks.onPresented(sample.config, { ...message, bytes: sample.bytes }, link, sample.sessionGeneration); }
-      } else if (message.type === 'consumed' && message.dropped) pending.delete(message.sequence);
-      else if (message.type === 'keyframe-needed') { pending.clear(); callbacks.onRecovering(); }
+        if (sample) { pending.delete(message.sequence); callbacks.onPresented(sample.config, { ...message, bytes: sample.bytes, mainQueueMs: sample.mainQueueMs }, link, sample.sessionGeneration); }
+      } else if (message.type === 'superseded') { if (pending.delete(message.sequence)) callbacks.onSuperseded?.(); }
+      else if (message.type === 'consumed' && message.dropped) { if (pending.delete(message.sequence)) callbacks.onDropped?.(1); }
+      // No blanket clear: the decoder reports each discarded unit as consumed/dropped (counted once, above). A unit
+      // admitted after the reset, such as the keyframe that ends recovery, is still presented and clears this state.
+      else if (message.type === 'keyframe-needed') callbacks.onRecovering();
       if (message.type === 'fault' || message.type === 'closed') {
         const unsupported = message.type === 'fault' && message.reason === 'unsupported-decoder-config';
         mainPort?.postMessage(message); localFallback(unsupported ? 'decoder_unsupported' : 'decoder_unavailable', 'Video decoding is unavailable. Using image updates.', !unsupported); return;

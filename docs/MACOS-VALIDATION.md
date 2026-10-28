@@ -511,5 +511,147 @@ control was tested in the separate unfused companion; the shipping bundle has
 its security fuses enabled. The user's installed app was not replaced.
 
 These checks do not establish actual OS sleep/wake or a visual menu-glyph
-signoff. The fresh Windows diagnostic run is still pending its two-sided
-automation/preflight preparation.
+signoff. The subsequent Windows run is recorded below.
+
+## Windows-generated video r3: verification stopped before measurement
+
+Run `mac-low-20261027-r3` used automated Git-channel handoff, the frozen Mac
+`fa5928c` viewer / `ae2d20e` common frontend, and a separately instrumented
+Windows Diagnostic host. The Mac received seven initial visible 1920 × 1280
+video draw callbacks over TLS 1.3, AES-256-GCM and X25519. Only viewing was
+granted; this run sent no OS input, clipboard, files or power actions and did
+not capture either real desktop.
+
+Windows stopped at its private-peer/view-only verification step. Its retained
+trace reported **424 generated frames in the last pre-abort sample, one producer,
+one GPU encoder, zero CPU readbacks in every caller class, and zero trace drops**.
+The final quiescent sample reached 465 frames with the same zero-readback/drop
+counts. This stop was not a
+native-source/readback failure. No READY was issued, so the planned 30-second
+playback measurement and 16-second terminal observation were **not run**.
+
+The Windows owner reproduced a verifier defect offline using the actual
+`DevicePermissions` serializer: its computed `isValid: true` metadata was
+incorrectly counted as an extra permission grant. A corrected harness validates
+the five actual grant booleans and known metadata separately; five contract
+tests passed. This proves a sufficient test defect, without retrospectively
+establishing every discarded runtime comparison value. No product permission
+check was relaxed or changed.
+
+Both sides completed graceful cleanup. Mac recorded zero forced terminations,
+zero owned processes/listeners, removed its profile and exited its driver.
+Windows reported process/listener/profile/bridge/invite/proof cleanup. The Mac
+removed the exact preflight download after matching its SHA; its ignored private
+record remains local.
+
+The Mac's final telemetry file had null renderer/request fields after shutdown,
+so later Mac mode and request counts cannot be recovered from that run. The
+frozen r3 source and evidence remain unchanged. A new source-only harness adds
+bounded observation history, retains the last valid values with their original
+timestamps and marks unavailability explicitly. It passed 28 distinct offline
+checks, including the actual snapshot function's late-completion race. Further
+live testing requires review, fresh identities/preflight and a new agreed slot.
+R2's earlier three readbacks still have no established cause.
+
+## Internal S3 native Mac batching follow-up
+
+The separate `5eb389b` source worktree includes the later S3 input-batching
+feature, outside the frozen preview.5 / `02e6a15` installer and the Windows
+comparison checkpoint. Its host/Mac harness and renderer builds passed with
+zero build warnings/errors. The opt-in native-session case passed in 9.8 s
+(10.1 s total).
+
+On each of two displays, 22 synthetic key-down/up events reached the owned
+textarea in the expected order, including Shift down/up around an uppercase
+character followed by a lowercase character. Each burst used **two requests**,
+one containing **21 events**, with **one request in flight**, zero pending
+requests afterward and zero probe parse errors. This is actual Mac input and
+wire-batch evidence, not a network latency or throughput benchmark.
+
+The same case passed capture, pointer/click, modifier-release, clipboard
+restoration, forced own-host crash/restart, owner end and revocation checks.
+Login-keychain counts stayed 15/5/1/0 throughout. The new test is opt-in with
+`ORBIT_MAC_TEST_BATCH=1`; it does not alter product behavior, the local preview
+DMG, or the source frozen for the next cross-device run.
+
+## Cross-device r4: standby transport failure, no Mac session
+
+The new run validated fresh private preflight data and both reviewed harness
+components. The Mac watcher armed at 07:29:22 UTC. At 07:31:02, an eight-second
+Git fetch timed out before any HOST_READY event was consumed. It published
+ABORT and stopped with cleanup passing. No Mac app, native host, profile,
+identity, pairing request or video measurement started.
+
+Windows had read the earlier armed acknowledgment and briefly bootstrapped
+before consuming that abort. It then stopped automatically: zero accepted Mac
+connections, zero source/readback/input/clipboard counters, and process,
+listener, profile, bridge and exchange-file cleanup completed. This is a
+pre-start coordination failure, not an authentication or video result. The Mac
+removed only the unused invitation and preflight downloads after checking their
+expected hashes; the exact inbox entries were already absent.
+
+A new source-only correction uses a cancellable asynchronous fetch. Only a
+known timeout before HOST_READY may be recorded and polled again, with the
+original absolute standby deadline unchanged. Other errors and all post-HOST
+read failures still abort. Thirty-seven offline checks passed, including nine
+new actual-reader/poll fixtures. It is awaiting independent review; Windows also
+requires a pre-bootstrap terminal-event guard. No further live run is claimed.
+
+## Mac installer source versus preview release baseline
+
+A source comparison of the tested Mac installer checkpoint `02e6a15` with
+preview product baseline `9e69ef5` found no changes in `apps/desktop`, `src`,
+`native`, `scripts`, `Directory.Build.props` or `global.json`. Electron,
+renderer and host Git trees match exactly. All 19 changed files are documentation
+or internal coordination records. This is source-equivalence evidence, not a
+new runtime test or a claim that Windows and Mac binaries are identical.
+
+The tested ARM64 DMG therefore remains current for that product baseline; it
+is still version 0.1.0, ad-hoc signed and unnotarized. The separately frozen
+cross-device diagnostic continues to use its agreed older frontend checkpoint;
+this comparison does not authorize switching that run's build or source seals.
+
+## Shipping fused Mac bundle: normal shutdown
+
+The exact `02e6a15` shipping bundle passed a local, unpaired startup and normal
+macOS Quit check. Strict code-signature verification passed. RunAsNode,
+NODE_OPTIONS and inspector fuses remained disabled; embedded ASAR integrity and
+ASAR-only loading remained enabled. The child ran without the development SDK
+on PATH. Its isolated control listener returned 401 without authentication.
+
+An `NSRunningApplication.terminate()` request addressed the exact running bundle
+and PID. The app exited with code 0 and no signal. Quit plus the remaining
+checks took about 0.58 s: **zero forced terminations, zero owned processes, zero
+control/remote listeners**, and the temporary profile was removed. Login-keychain
+counts stayed 15 certificates, 5 keys, 1 identity and zero Orbit certificates
+before launch, while running and after quit. No pairing, capture, input or
+clipboard operation was performed. This tests a normal OS Quit request; it does
+not establish a physical tray-menu click or visual icon signoff.
+
+The main executable, Electron framework and ASAR hashes stayed unchanged. A
+read-only mount of the existing ARM64 DMG matched all three files to the tested
+bundle, and that mount was detached. The DMG SHA remains
+`ece64cbc046e28656496f86a337c7c13a10f41aa35c5c0a4754fef6f0a2bfbd6`.
+
+The first probe stopped on an uncaught test-harness process-name assertion
+before measuring Quit. Its exact command observation and forced-termination
+count were not retained, so that attempt is not a passing shutdown result.
+Subsequent inspection found no matching app or test listeners; the exact
+21-entry temporary profile had no open files and was removed. The corrected
+probe uses full-width process metadata and catches tracking errors. The failed
+probe source and receipt remain separate from the successful run.
+
+## Offline paired-run preparation while Windows is unavailable
+
+The user reported Windows unavailable, so no new paired run is armed. The Mac
+timeout amendment received independent source review: all seven review pins
+matched and nine focused checks passed. Its earlier 37 local checks are separate.
+
+The proposed Windows startup guard passed its original 22 offline checks and
+all 14 manifest file hashes matched. An additional actual-controller/guard
+fixture failed: when the run folder appeared after the five-second abort wait,
+the already-consumed abort had no persistent marker and the bootstrap guard
+permitted startup. This is a synthetic source-level harness result, with no
+real Windows app or network operation. Changes were requested to retain the
+abort in an already-owned location before wrapper launch; source approval and
+the full 30-second/16-second paired test remain pending.

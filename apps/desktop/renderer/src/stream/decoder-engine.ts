@@ -1,4 +1,5 @@
-import type { DecoderInput, DecoderOutput, StreamConfig } from './types.ts';
+import type { DecodeMode, DecoderInput, DecoderOutput, StreamConfig } from './types.ts';
+import { FramePresenter } from './frame-presenter.ts';
 
 /**
  * A decoder whose oldest undecoded frame waits longer than this is replaced (fresh keyframe). Shorter hiccups catch up on
@@ -8,6 +9,11 @@ import type { DecoderInput, DecoderOutput, StreamConfig } from './types.ts';
 export const DECODER_STALL_MS = 500;
 /** Hard bound on undecoded work whatever its age (about 200 ms at 60 fps). */
 export const MAX_PENDING_FRAMES = 12;
+/** Timer coarsening tolerance: a duration this slightly negative is read as 0, anything below is invalid. */
+const CLOCK_TOLERANCE_MS = .2;
+type Presented = Extract<DecoderOutput, { type: 'presented' }>;
+type Acceleration = 'prefer-hardware' | 'prefer-software';
+const ACCELERATIONS: readonly Acceleration[] = ['prefer-hardware', 'prefer-software'];
 
 type Dependencies = {
   post(message: DecoderOutput): void;
@@ -15,7 +21,19 @@ type Dependencies = {
   createDecoder?: (callbacks: VideoDecoderInit) => VideoDecoder;
   supports?: (config: VideoDecoderConfig) => Promise<boolean>;
   createChunk?: (value: EncodedVideoChunkInit) => EncodedVideoChunk;
+  /** This Worker's requestAnimationFrame; without it every decoded frame is drawn at once. */
+  animationFrame?: (callback: () => void) => void;
+  timer?: (callback: () => void, ms: number) => void;
+  /**
+   * The runtime treats `prefer-hardware` as hardware only (Chromium: isConfigSupported is false and configure fails
+   * without a hardware decoder). Only then can a working prefer-hardware decoder be reported as 'hardware'.
+   */
+  strictHardwarePreference?: boolean;
+  /** Messages admitted to this Worker and not yet handled (decoder-admission.ts); each may hold a newer unit. */
+  backlog?: () => number;
 };
+type Sample = { sequence: number; timestamp: number; started: number; received: number; windowQueueMs?: number };
+type Decoded = { sample: Sample; config: StreamConfig; generation: number; decodedAt: number };
 
 // No network access or application IPC lives here. Admission credits and
 // consumed messages are distinct from presentation, so dropping deltas can
@@ -30,13 +48,22 @@ export class StreamDecoderEngine {
   private readonly createChunk: (value: EncodedVideoChunkInit) => EncodedVideoChunk;
   private decoder?: VideoDecoder;
   private config?: StreamConfig;
+  private acceleration: Acceleration = 'prefer-hardware';
   private generation = 0;
   private closed = false;
   private needsKeyframe = true;
   private recovering = false;
+  /** A decoder of the current configuration has produced a frame (hardware worked once, so a failure is not "early"). */
+  private decoded = false;
+  /** The installed decoder instance itself has produced a frame; a rebuilt decoder starts unconfirmed. */
+  private instanceDecoded = false;
+  /** isConfigSupported() answered exactly true for prefer-hardware with the current configuration. */
+  private hardwareSupported = false;
+  private reportedMode?: DecodeMode;
   private lastRecoveryAttempt = -Infinity;
   private lastKeyframeRequest = -Infinity;
-  private pending: { sequence: number; timestamp: number; started: number }[] = [];
+  private pending: Sample[] = [];
+  private readonly presenter: FramePresenter<Decoded>;
 
   constructor(canvas: OffscreenCanvas, dependencies: Dependencies) {
     this.canvas = canvas; this.dependencies = dependencies;
@@ -47,18 +74,29 @@ export class StreamDecoderEngine {
     this.createDecoder = dependencies.createDecoder ?? (callbacks => new VideoDecoder(callbacks));
     this.supports = dependencies.supports ?? (async config => (await VideoDecoder.isConfigSupported(config)).supported === true);
     this.createChunk = dependencies.createChunk ?? (value => new EncodedVideoChunk(value));
+    this.presenter = new FramePresenter<Decoded>({ animationFrame: dependencies.animationFrame, timer: dependencies.timer, now: this.now,
+      // Called from the output callback, after the offered frame left `pending`: anything still tracked is newer input.
+      newerPending: () => (this.decoder?.decodeQueueSize ?? 0) > 0 || this.pending.length > 0 || (dependencies.backlog?.() ?? 0) > 0,
+      draw: (frame, decoded) => this.present(frame, decoded),
+      superseded: decoded => { if (!this.closed && decoded.generation === this.generation) this.dependencies.post({ type: 'superseded', sequence: decoded.sample.sequence }); } });
   }
 
-  private decoderConfig(config: StreamConfig): VideoDecoderConfig {
+  private decoderConfig(config: StreamConfig, acceleration: Acceleration): VideoDecoderConfig {
     return { codec: config.codec, codedWidth: config.codedWidth, codedHeight: config.codedHeight,
       displayAspectWidth: config.width, displayAspectHeight: config.height,
-      hardwareAcceleration: 'prefer-hardware', optimizeForLatency: true,
+      hardwareAcceleration: acceleration, optimizeForLatency: true,
       colorSpace: { primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', fullRange: false } };
   }
 
   private discardDecoder() {
-    const old = this.decoder; this.decoder = undefined; this.pending = [];
+    // Units this decoder will never display: the decoded frame waiting for display and every unit still in the decoder.
+    // Each is reported as dropped, so main and the window forget exactly these and keep units admitted after them
+    // (a keyframe in flight during recovery is still presented, and nothing waits for the stall timer).
+    const held = this.presenter.clear();
+    const lost = held ? [held.sample, ...this.pending] : this.pending;
+    const old = this.decoder; this.decoder = undefined; this.pending = []; this.instanceDecoded = false;
     if (old && old.state !== 'closed') { try { old.close(); } catch { /* Already closing. */ } }
+    for (const sample of lost) this.dependencies.post({ type: 'consumed', sequence: sample.sequence, dropped: true });
   }
 
   private requestKeyframe(reason: string) {
@@ -78,36 +116,97 @@ export class StreamDecoderEngine {
   }
 
   private installDecoder(config: StreamConfig, generation: number) {
-    const decoder = this.createDecoder({
+    this.instanceDecoded = false;
+    const decoder: VideoDecoder = this.createDecoder({
       output: frame => {
+        let handedOver = false, sample: Sample | undefined;
         try {
-          if (this.closed || generation !== this.generation) return;
+          if (this.closed || generation !== this.generation || decoder !== this.decoder) return;
           const index = this.pending.findIndex(value => value.timestamp === frame.timestamp);
           if (index < 0 || frame.displayWidth !== config.width || frame.displayHeight !== config.height) {
             this.recover('decoded-frame-mismatch'); return;
           }
-          const [sample] = this.pending.splice(index, 1);
-          const beforeDraw = this.now();
-          if (this.canvas.width !== config.width || this.canvas.height !== config.height) {
-            this.canvas.width = config.width; this.canvas.height = config.height;
-          }
-          this.context.drawImage(frame, 0, 0, config.width, config.height);
-          this.dependencies.post({ type: 'presented', sequence: sample.sequence, timestamp: sample.timestamp,
-            decodeMs: Math.max(0, beforeDraw - sample.started), drawMs: Math.max(0, this.now() - beforeDraw) });
-        } catch { this.recover('frame-draw-failed'); }
-        finally { frame.close(); }
+          [sample] = this.pending.splice(index, 1);
+          if (!this.instanceDecoded) { this.decoded = true; this.instanceDecoded = true; this.reportMode(generation, config); }
+          // Every unit was decoded; display takes only the newest frame per animation frame (S2).
+          handedOver = true;
+          this.presenter.offer(frame, { sample, config, generation, decodedAt: this.now() });
+        } catch {
+          // The unit left `pending`, so the reset below cannot report it; report it here (a repeat is ignored).
+          if (sample) this.dependencies.post({ type: 'consumed', sequence: sample.sequence, dropped: true });
+          this.recover('frame-draw-failed');
+        }
+        finally { if (!handedOver) frame.close(); }
       },
-      error: () => { if (generation === this.generation) this.recover('decoder-error'); },
+      error: () => {
+        if (generation !== this.generation) return;
+        // A hardware decoder that fails before its first frame usually fails again,
+        // so the next rebuild uses software when that is supported.
+        const early = this.acceleration === 'prefer-hardware' && !this.decoded;
+        this.recover('decoder-error');
+        if (early) void this.fallBackToSoftware(config, this.generation);
+      },
     });
     // Keep the reference before configure, so a synchronous failure also closes it.
     this.decoder = decoder;
-    decoder.configure(this.decoderConfig(config));
+    decoder.configure(this.decoderConfig(config, this.acceleration));
+  }
+
+  private async fallBackToSoftware(config: StreamConfig, generation: number) {
+    let supported = false;
+    try { supported = await this.supports(this.decoderConfig(config, 'prefer-software')); } catch { /* Keep hardware recovery. */ }
+    if (this.closed || generation !== this.generation || !supported) return;
+    this.acceleration = 'prefer-software';
+  }
+
+  /** Draws one decoded frame. Called by the presenter, which closes the frame afterwards. */
+  private present(frame: VideoFrame, { sample, config, generation, decodedAt }: Decoded) {
+    if (this.closed || generation !== this.generation) return;
+    try {
+      const beforeDraw = this.now();
+      if (this.canvas.width !== config.width || this.canvas.height !== config.height) {
+        this.canvas.width = config.width; this.canvas.height = config.height;
+      }
+      this.context.drawImage(frame, 0, 0, config.width, config.height);
+      const drawn = this.now(), windowQueueMs = sample.windowQueueMs;
+      // decodeMs runs from decode() to output, so it includes VideoDecoder's own queue; WebCodecs does not expose it.
+      // Any wait for the animation frame lies between decodeMs and drawMs and is part of viewerMs only.
+      const presented: Presented = { type: 'presented', sequence: sample.sequence, timestamp: sample.timestamp,
+        decodeMs: Math.max(0, decodedAt - sample.started), drawMs: Math.max(0, drawn - beforeDraw) };
+      // Window time and Worker time are each measured on their own clock and only added, never subtracted across
+      // contexts. Without a valid window part neither total is reported, rather than a partial one.
+      if (windowQueueMs !== undefined) {
+        presented.queueMs = windowQueueMs + Math.max(0, sample.started - sample.received);
+        presented.viewerMs = windowQueueMs + Math.max(0, drawn - sample.received);
+      }
+      this.dependencies.post(presented);
+    } catch {
+      this.dependencies.post({ type: 'consumed', sequence: sample.sequence, dropped: true });
+      this.recover('frame-draw-failed');
+    }
+  }
+
+  /**
+   * 'software' while the prefer-software decoder is in use. 'hardware' only when the runtime treats prefer-hardware as
+   * hardware only, isConfigSupported() accepted prefer-hardware for this configuration and the installed decoder has
+   * produced a frame. Everything else, including a rebuilt decoder that has not decoded yet, is 'unknown'.
+   */
+  private decodeMode(): DecodeMode {
+    if (this.acceleration === 'prefer-software') return 'software';
+    return this.dependencies.strictHardwarePreference === true && this.hardwareSupported && this.instanceDecoded ? 'hardware' : 'unknown';
+  }
+
+  private reportMode(generation: number, config: StreamConfig) {
+    const decodeMode = this.decodeMode();
+    if (decodeMode === this.reportedMode) return;
+    this.reportedMode = decodeMode;
+    this.dependencies.post({ type: 'configured', generation, width: config.width, height: config.height, decodeMode });
   }
 
   private async configure(config: StreamConfig) {
     const generation = ++this.generation;
     this.discardDecoder(); this.config = undefined; this.needsKeyframe = true;
-    this.recovering = false; this.lastRecoveryAttempt = -Infinity;
+    this.recovering = false; this.decoded = false; this.hardwareSupported = false; this.lastRecoveryAttempt = -Infinity;
     // Defensive bounds supplement main's complete wire validation. Never resize
     // the canvas from unbounded metadata or assume a supported config is hardware.
     if (!config || !/^avc1\.[0-9A-F]{6}$/.test(config.codec) || !Number.isInteger(config.width) || !Number.isInteger(config.height)
@@ -115,17 +214,29 @@ export class StreamDecoderEngine {
       || !Number.isInteger(config.codedWidth) || !Number.isInteger(config.codedHeight)
       || config.codedWidth < config.width || config.codedWidth > config.width + 16
       || config.codedHeight < config.height || config.codedHeight > config.height + 16) { this.fail('invalid-decoder-config'); return; }
-    try {
-      const supported = await this.supports(this.decoderConfig(config));
+    // One prefer-software retry before image polling. The prefer-hardware answer is kept: with a hardware-only
+    // runtime it lets the first decoded frame be reported as hardware (see decodeMode()).
+    // The hardware attempt's failure decides the reported reason (and so whether
+    // video is retried later); the software attempt can only rescue the stream.
+    let reason: string | undefined;
+    for (const acceleration of ACCELERATIONS) {
+      let supported = false;
+      try { supported = await this.supports(this.decoderConfig(config, acceleration)); }
+      catch { reason ??= 'decoder-configuration-failed'; }
       if (this.closed || generation !== this.generation) return;
-      if (!supported) { this.fail('unsupported-decoder-config'); return; }
-      this.config = { ...config };
-      this.installDecoder(this.config, generation);
-      this.dependencies.post({ type: 'configured', generation, width: config.width, height: config.height });
-    } catch { if (!this.closed && generation === this.generation) this.fail('decoder-configuration-failed'); }
+      if (acceleration === 'prefer-hardware') this.hardwareSupported = supported === true;
+      if (!supported) { reason ??= 'unsupported-decoder-config'; continue; }
+      this.acceleration = acceleration; this.config = { ...config };
+      try { this.installDecoder(this.config, generation); }
+      catch { this.discardDecoder(); this.config = undefined; reason ??= 'decoder-configuration-failed'; continue; }
+      this.reportedMode = undefined; this.reportMode(generation, config);
+      return;
+    }
+    this.fail(reason ?? 'unsupported-decoder-config');
   }
 
   async handle(message: DecoderInput) {
+    const received = this.now();
     if (this.closed) return;
     if (message.type === 'config') { await this.configure(message.config); return; }
     if (message.type === 'terminal' || message.type === 'close') { this.close(); return; }
@@ -143,6 +254,7 @@ export class StreamDecoderEngine {
         }
         if (this.recovering) this.lastRecoveryAttempt = this.now();
         this.installDecoder(this.config, this.generation);
+        this.reportMode(this.generation, this.config);
       }
       const decoder = this.decoder;
       if (!decoder) { this.requestKeyframe('waiting-for-keyframe'); return; }
@@ -151,7 +263,9 @@ export class StreamDecoderEngine {
         || oldest !== undefined && this.now() - oldest.started > DECODER_STALL_MS) { this.recover('decode-queue-overflow'); return; }
       if (this.needsKeyframe && !message.keyframe) { this.requestKeyframe('waiting-for-keyframe'); return; }
       const chunk = this.createChunk({ type: message.keyframe ? 'key' : 'delta', timestamp: message.timestamp, data: message.data });
-      this.pending.push({ sequence: message.sequence, timestamp: message.timestamp, started: this.now() });
+      const fromWindow = message.windowQueueMs;
+      const windowQueueMs = typeof fromWindow === 'number' && fromWindow >= -CLOCK_TOLERANCE_MS && fromWindow <= 60000 ? Math.max(0, fromWindow) : undefined;
+      this.pending.push({ sequence: message.sequence, timestamp: message.timestamp, started: this.now(), received, windowQueueMs });
       const generation = this.generation;
       decoder.decode(chunk);
       if (generation === this.generation) { this.needsKeyframe = false; dropped = false; }
@@ -166,7 +280,7 @@ export class StreamDecoderEngine {
 
   close() {
     if (this.closed) return;
-    this.closed = true; this.generation++; this.discardDecoder(); this.config = undefined;
+    this.closed = true; this.generation++; this.discardDecoder(); this.presenter.close(); this.config = undefined;
     this.context.clearRect(0, 0, this.canvas.width, this.canvas.height);
     this.dependencies.post({ type: 'closed' });
   }

@@ -40,7 +40,35 @@ class HostSupervisor {
     return delay;
   }
   snapshot() { return { ...this.value }; }
-  canRetry() { return this.value.state === 'stopped' || this.value.state === 'reconnecting'; }
+  // 'offline' is a healthy host without remote listening (Tailscale was off at
+  // start). Only a fresh host start looks for Tailscale again, so the owner may
+  // ask for one. A running host is never restarted from the UI.
+  canRetry() { return ['stopped', 'reconnecting', 'offline'].includes(this.value.state); }
+}
+
+// The single local step a permitted Retry takes: stop a live child so the exit
+// handler starts a fresh one, mark a child that is already stopping, or start
+// a new child when none is alive. No step grants or changes any permission.
+function retryStep(allowed, child) {
+  if (!allowed) return 'none';
+  if (child && child.exitCode === null) return child.orbitStopping ? 'mark' : 'stop';
+  return 'start';
+}
+
+const MANUAL_RESTART_INTERVAL = 10000;
+
+// Why a UI-requested restart must not happen now, or null when it may. 'offline'
+// also covers an expired identity and an identity rotation, where a restart cannot
+// help; only a host that truly saw Tailscale off may restart to look again, and
+// never while a device is connected to it. Owner restarts are at least 10 s apart.
+function retryRefusal({ state, rawStatus, rotationInFlight = false, lastManualAt = null, now }) {
+  if (lastManualAt !== null && now - lastManualAt < MANUAL_RESTART_INTERVAL) return 'too_soon';
+  if (state !== 'offline') return null;
+  if (!rawStatus || typeof rawStatus !== 'object') return 'status_unknown';
+  if (rawStatus.identity?.expired === true) return 'identity_expired';
+  if (rotationInFlight || rawStatus.transport?.mode !== 'offline') return 'identity_rotating';
+  if (Array.isArray(rawStatus.sessions) && rawStatus.sessions.length > 0) return 'sessions_active';
+  return null;
 }
 
 function tailscaleObservation(value) {
@@ -52,6 +80,16 @@ function tailscaleObservation(value) {
     const octets = address.split('.').map(Number);
     return octets.length === 4 && octets.every(n => n >= 0 && n <= 255) && octets[0] === 100 && octets[1] >= 64 && octets[1] <= 127;
   }) ?? null;
+}
+
+// Stable list of active incoming pairings (id plus pairing time, so a re-pair
+// that keeps its id still counts) from a raw host status, or undefined
+// when the status does not carry them (the UI status omits pairedDevices).
+// Main compares it on its existing health probe so a new pairing reaches the
+// owner window through the existing change signal, without extra polling.
+function pairedDevicesSignature(status) {
+  if (!Array.isArray(status?.pairedDevices)) return undefined;
+  return JSON.stringify(status.pairedDevices.filter(device => device && !device.revokedAt).map(device => String(device.id) + '@' + String(device.createdAt ?? device.pairedAt ?? '')).sort());
 }
 
 class NetworkChangeTracker {
@@ -114,4 +152,4 @@ class BoundedHostLog {
   end() { this.closed = true; }
 }
 
-module.exports = { HostSupervisor, NetworkChangeTracker, tailscaleObservation, BoundedHostLog, IdentityRotationGuard };
+module.exports = { HostSupervisor, NetworkChangeTracker, tailscaleObservation, BoundedHostLog, IdentityRotationGuard, retryStep, retryRefusal, pairedDevicesSignature };

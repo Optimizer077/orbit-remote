@@ -353,8 +353,11 @@ internal sealed class WindowsPlatformBackend : IPlatformBackend, IFrameChangeSou
         return monitors;
     }
 
-    private static PlatformUnavailableException Failure(string code, string message) => new(code,
-        $"{message} ({new Win32Exception(Marshal.GetLastWin32Error()).Message})");
+    private static PlatformUnavailableException Failure(string code, string message)
+    {
+        var error = Marshal.GetLastWin32Error();
+        return new(code, message, $"Win32 error {error}: {new Win32Exception(error).Message}");
+    }
 
     private static IReadOnlyDictionary<string, ushort> BuildKeys()
     {

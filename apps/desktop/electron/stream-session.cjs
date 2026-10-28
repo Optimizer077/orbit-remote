@@ -1,6 +1,7 @@
 'use strict';
 const crypto = require('node:crypto');
 const { remoteStream, isDisplayAsleep, DISPLAY_ASLEEP_MESSAGE } = require('./transport.cjs');
+const { neutralText } = require('./peer-data.cjs');
 const { OrbitStreamParser, StreamProtocolError } = require('./stream-parser.cjs');
 const { SECURITY_TERMINAL, IDENTITY_TERMINAL, IDENTITY_CHANGED_MESSAGE } = require('./security-terminal.cjs');
 
@@ -8,8 +9,12 @@ const SESSION_TERMINAL = new Set(['session_ended', 'session_ended_by_host', 'str
 const ACK_INTERVAL_MS = 1000 / 30; // c993263: cumulative receipt acknowledgements at most30Hz.
 const MAX_STREAMS = 8;
 const MAX_QUEUED_RECORDS = 12;
-// Above the decoder's12/500ms recovery cap; payload queue remains bounded separately.
-const MAX_UNCONSUMED_UNITS = 16;
+// Records main may post to the renderer before the decoder Worker returns credit (S2). The Worker admits at most this
+// many messages (renderer/src/stream/decoder-admission.ts, VIDEO_CREDIT_WINDOW) and returns one credit per handled message.
+const VIDEO_CREDIT_WINDOW = 3;
+// AUs posted but not yet presented, superseded or dropped can sit in: the decoder (it recovers above 12 waiting, or after
+// 500 ms), the credit window, and the one decoded frame waiting for display. Three more for margin, as before the window.
+const MAX_UNCONSUMED_UNITS = 12 + VIDEO_CREDIT_WINDOW + 1 + 3;
 const RETRYABLE_FALLBACK = new Set(['stream_eof', 'stream_stalled', 'decoder_stalled', 'decoder_unavailable',
   'stream_restart', 'stream_error', 'host_stopping', 'session_reconnected']);
 const RETRYABLE_NETWORK = new Set(['ECONNRESET', 'ECONNREFUSED', 'ECONNABORTED', 'ETIMEDOUT', 'EHOSTUNREACH',
@@ -19,7 +24,8 @@ const RETRYABLE_NETWORK = new Set(['ECONNRESET', 'ECONNREFUSED', 'ECONNABORTED',
 const RETRYABLE_HTTP = new Set([408, 429, 500, 502, 503, 504]);
 const uint = value => Number.isInteger(value) && value >= 0 && value <= 0xffffffff;
 const duration = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 60000;
-const text = value => String(value || 'Video stream unavailable.').slice(0, 500);
+// Failure text can come from the remote host: bounded, with unsafe characters neutralised (peer-data.cjs).
+const text = value => neutralText(value == null ? undefined : String(value)) || 'Video stream unavailable.';
 const CAPACITY_MESSAGE = 'Video is busy. Up to 4 screens per device and 8 per host can use video. Close a screen or try again later.';
 const failureText = (value, code) => IDENTITY_TERMINAL.has(code) ? IDENTITY_CHANGED_MESSAGE : code === 'stream_capacity' ? CAPACITY_MESSAGE : text(value);
 
@@ -89,6 +95,8 @@ class SessionVideoStreams {
     this.ackInterval = options.ackInterval ?? ACK_INTERVAL_MS;
     this.entries = new Map();
     this.controlFlights = new Map();
+    // Parse time per queued access unit, on main's clock only (viewer timing, S1).
+    this.parsedAt = new WeakMap();
   }
 
   open(payload, port, owner) {
@@ -115,9 +123,9 @@ class SessionVideoStreams {
     if (this.entries.size >= MAX_STREAMS) throw new Error('Close another video stream first.');
     const entry = { id: crypto.randomUUID(), owner, port, session, sessionId: payload.sessionId, remoteId: session.remoteId,
       monitorId: monitor.id, sessionGeneration: session.sessionGeneration ?? 0, slotKey: Object.hasOwn(payload, 'monitorId') ? payload.monitorId || '' : session.monitorId || '',
-      settings, aborter: new AbortController(), queue: [], pending: new Map(), credit: 0, closed: false,
-      started: this.now(), lastSent: this.now(), everCredit: false, lastControl: -Infinity, lastKeyframe: -Infinity,
-      settingsPending: null, ack: null, lastAckSent: -1, lastDecodeMs: 0, keyframe: false, controlBusy: false, config: null, geometry: null, lastSentSequence: -1,
+      settings, aborter: new AbortController(), queue: [], pending: new Map(), credit: 0, inFlight: [], closed: false,
+      started: this.now(), everCredit: false, lastControl: -Infinity, lastKeyframe: -Infinity,
+      settingsPending: null, ack: null, lastAckSent: -1, lastDecodeMs: 0, roundTripMs: undefined, roundTripAt: 0, keyframe: false, controlBusy: false, config: null, geometry: null, lastSentSequence: -1,
       messageWindow: this.now(), messageCount: 0, pointer: null, pointerShape: null, pointerSentShape: null, pointerOutstanding: null,
       pointerSentAt: 0, lastPointerSent: -Infinity, deliveredConfig: null, pointerTimer: null };
     entry.parser = new OrbitStreamParser({ monitorId: monitor.id, allowCursor: settings.localCursor, onRecord: record => this.record(entry, record) });
@@ -132,7 +140,8 @@ class SessionVideoStreams {
     entry.timer = setInterval(() => {
       if (!this.current(entry)) return this.finish(entry, this.inactiveStatus(entry));
       const now = this.now();
-      if ((!entry.everCredit && now - entry.started > 10000) || (!entry.credit && entry.everCredit && now - entry.lastSent > 5000)
+      // The Worker handles records in order, so the oldest uncredited record shows whether it stopped responding.
+      if ((!entry.everCredit && now - entry.started > 10000) || (entry.inFlight.length && now - entry.inFlight[0] > 5000)
         || [...entry.pending.values()].some(sample => now - sample.sentAt > 5000)
         || (entry.pointerOutstanding !== null && now - entry.pointerSentAt > 5000))
         this.finish(entry, { state: 'fallback', code: 'decoder_stalled', error: 'The video decoder stopped responding. Using image updates.' });
@@ -247,6 +256,7 @@ class SessionVideoStreams {
         throw new StreamProtocolError('The video consumer exceeded its bounded window.');
       // Acknowledge only a fully received, validated AU. Presentation remains
       // separate telemetry; the decoder has its own bounded queue and drops.
+      this.parsedAt.set(record, this.now());
       this.ack(entry, record.sequence);
     }
     if (entry.queue.length >= MAX_QUEUED_RECORDS) throw new StreamProtocolError('The video record queue is full.');
@@ -254,18 +264,35 @@ class SessionVideoStreams {
   }
 
   pump(entry) {
-    if (!this.current(entry) || !entry.credit || !entry.queue.length) return;
-    // A hidden-pointer transition must reach the renderer before a following
-    // composited frame, even while the preceding pointer awaits consumption.
-    if (entry.queue[0].type === 'access-unit' && entry.pointer?.record.cursor.visible === false) return;
-    const record = entry.queue.shift();
-    entry.credit = 0; entry.lastSent = this.now();
+    // One record per credit, up to VIDEO_CREDIT_WINDOW in flight. flushCursor may re-enter; each pass re-checks credit.
+    while (this.current(entry) && entry.credit > 0 && entry.queue.length) {
+      // A hidden-pointer transition must reach the renderer before a following
+      // composited frame, even while the preceding pointer awaits consumption.
+      if (entry.queue[0].type === 'access-unit' && entry.pointer?.record.cursor.visible === false) return;
+      this.sendRecord(entry, entry.queue.shift());
+    }
+  }
+
+  sendRecord(entry, record) {
+    const now = this.now(), parsedAt = this.parsedAt.get(record);
+    entry.credit--; entry.inFlight.push(now);
     if (record.type === 'access-unit') {
-      entry.pending.set(record.sequence, { config: entry.config, sentAt: this.now() });
+      entry.pending.set(record.sequence, { config: entry.config, sentAt: now });
       entry.lastSentSequence = record.sequence;
     }
     if (record.type === 'config') entry.deliveredConfig = record.config;
-    this.post(entry, { type: 'record', record, ...(record.type === 'config' ? { sessionGeneration: entry.sessionGeneration } : {}) });
+    // No transfer list: MessagePortMain transfers only ports (an ArrayBuffer
+    // throws and post() closes the stream). The cross-process copy is required.
+    // Viewer timing rides on the record message: main's queue wait for this
+    // record and the latest control round trip with its age, all durations on
+    // main's clock (never timestamps).
+    const message = { type: 'record', record };
+    if (record.type === 'config') message.sessionGeneration = entry.sessionGeneration;
+    if (parsedAt !== undefined) message.mainQueueMs = Math.max(0, now - parsedAt);
+    if (entry.roundTripMs !== undefined) {
+      message.rttMs = entry.roundTripMs; message.rttAgeMs = Math.max(0, now - entry.roundTripAt); entry.roundTripMs = undefined;
+    }
+    this.post(entry, message);
     this.flushCursor(entry);
     if (!entry.queue.length && !entry.closed) entry.connection?.resume();
   }
@@ -286,13 +313,22 @@ class SessionVideoStreams {
       entry.pointerOutstanding = null; this.flushCursor(entry); return;
     }
     if (message.type === 'credit') {
-      if (message.count !== 1 || entry.credit !== 0) throw new Error('Invalid decoder credit.');
-      entry.credit = 1; entry.everCredit = true; this.pump(entry); return;
+      // Main is the trust boundary. The first grant is at most the window; every later credit returns records that main
+      // actually posted and that are still uncredited, so a doubled or invented credit cannot widen the window.
+      if (!Number.isInteger(message.count) || message.count < 1 || entry.credit + message.count > VIDEO_CREDIT_WINDOW
+        || (entry.everCredit && message.count > entry.inFlight.length)) throw new Error('Invalid decoder credit.');
+      // Credits return in send order; the first grant has nothing in flight.
+      entry.credit += message.count; entry.inFlight.splice(0, message.count); entry.everCredit = true; this.pump(entry); return;
     }
     if (message.type === 'consumed') {
       if (!uint(message.sequence) || typeof message.dropped !== 'boolean') throw new Error('Invalid decoder consumption.');
       if (message.dropped) entry.pending.delete(message.sequence);
       return;
+    }
+    if (message.type === 'superseded') {
+      // Decoded, then replaced by a newer frame before the next display refresh. Not a drop and not a presentation.
+      if (!uint(message.sequence)) throw new Error('Invalid decoder supersession.');
+      entry.pending.delete(message.sequence); return;
     }
     if (message.type === 'presented') {
       if (!uint(message.sequence) || !duration(message.decodeMs) || !duration(message.drawMs)) throw new Error('Invalid presentation.');
@@ -311,7 +347,9 @@ class SessionVideoStreams {
       return;
     }
     if (message.type === 'keyframe-needed') {
-      this.dropPending(entry); entry.keyframe = true; this.scheduleControl(entry);
+      // No blanket clear: the decoder reports each unit it discarded as consumed/dropped. Units admitted or in transit
+      // after the reset (possibly the keyframe that ends recovery) stay pending and are presented normally.
+      entry.keyframe = true; this.scheduleControl(entry);
       this.post(entry, { type: 'status', state: 'recovering' }); return;
     }
     if (message.type === 'fault' || message.type === 'closed') {
@@ -387,10 +425,15 @@ class SessionVideoStreams {
       this.finish(entry, { state: 'fallback', code: 'stream_unavailable', retryable: true, error: 'Video control is busy. Using image updates.' }); return;
     }
     entry.controlBusy = true; entry.lastControl = now;
+    const sentAt = this.now();
     const flight = this.controller.remote(entry.session.device, '/api/sessions/' + encodeURIComponent(entry.remoteId)
         + '/stream/control?monitorId=' + encodeURIComponent(entry.monitorId), { method: 'POST', body });
     this.controlFlights.set(controlKey, flight);
-    try { await flight; } catch (error) { if (!entry.closed) this.failure(entry, error); }
+    try {
+      await flight;
+      const measuredAt = this.now(), roundTrip = measuredAt - sentAt;
+      if (duration(roundTrip)) { entry.roundTripMs = roundTrip; entry.roundTripAt = measuredAt; }
+    } catch (error) { if (!entry.closed) this.failure(entry, error); }
     finally {
       if (this.controlFlights.get(controlKey) === flight) this.controlFlights.delete(controlKey);
       entry.controlBusy = false; this.scheduleControl(entry);
@@ -471,5 +514,5 @@ class SessionVideoStreams {
   shutdown() { for (const entry of this.entries.values()) this.close(entry.id, entry.owner); }
 }
 
-module.exports = { SessionVideoStreams, SESSION_TERMINAL, ACK_INTERVAL_MS, MAX_STREAMS, MAX_UNCONSUMED_UNITS, MAX_QUEUED_RECORDS,
+module.exports = { SessionVideoStreams, SESSION_TERMINAL, ACK_INTERVAL_MS, MAX_STREAMS, MAX_UNCONSUMED_UNITS, MAX_QUEUED_RECORDS, VIDEO_CREDIT_WINDOW,
   streamErrorPolicy, streamOpenError, frameRequestError, wakeDisplayError, sessionAvailability };

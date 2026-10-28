@@ -17,12 +17,19 @@ module.exports = {
   // Fuses: no ELECTRON_RUN_AS_NODE, NODE_OPTIONS or --inspect/SIGUSR1 debugger in an installed build, and app code
   // only from a packaged asar whose integrity is checked. A local process could otherwise run code as Orbit and use
   // its keys and OS permissions (a per-user install lets the same user replace app.asar).
-  ...(unfusedTest ? {} : { electronFuses: { runAsNode: false, enableNodeOptionsEnvironmentVariable: false,
+  // GrantFileProtocolExtraPrivileges stays on: the renderer is an ES-module bundle with a module worker loaded
+  // from file://. With the fuse off (Electron 45 probe) the window stays empty and the decoder worker fails with
+  // "cannot be accessed from origin 'null'". Turning it off needs a custom app:// protocol first.
+  // The test build is marked so main still accepts Playwright's debug switches and the ORBIT_* test variables
+  // (electron/launch-policy.cjs). A release build has no marker and refuses both.
+  ...(unfusedTest ? { extraMetadata: { orbitTestBuild: true } } : { electronFuses: { runAsNode: false, enableNodeOptionsEnvironmentVariable: false,
     enableNodeCliInspectArguments: false, onlyLoadAppFromAsar: true, enableEmbeddedAsarIntegrityValidation: true } }),
   files: ['dist/**/*', 'electron/**/*', 'package.json', '!electron/*.test.cjs', '!electron/test-fixtures/**/*'],
   extraResources: [
     { from: hostDirectory, to: 'host' },
     { from: 'build/icons', to: 'icons', filter: ['icon.png', 'tray*.png'] },
+    // Licence notices for third-party code in the host (Bouncy Castle C#, MIT).
+    { from: '../../THIRD_PARTY_NOTICES.md', to: 'THIRD_PARTY_NOTICES.md' },
   ],
   beforePack(context) {
     verifyHostBundle(hostDirectory, prefixes[context.electronPlatformName] + '-' + Arch[context.arch], context.packager.appInfo.version);

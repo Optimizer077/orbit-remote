@@ -6,7 +6,14 @@ const settingsPages = Object.freeze({
 });
 
 function createMacPermissionSetup({ dialog, systemPreferences, desktopCapturer, shell, getHostStatus }) {
-  return async function showMacPermissionSetup(parent) {
+  // One sheet at a time: the app menu, tray and Overview banner share this setup,
+  // so a second request while it is open joins the open one instead of stacking.
+  let open = null;
+  return function showMacPermissionSetup(parent) {
+    open ??= run(parent).finally(() => { open = null; });
+    return open;
+  };
+  async function run(parent) {
     const status = await getHostStatus();
     const platform = status.platform || {};
     const screen = platform.canCapture === true;
@@ -34,7 +41,7 @@ function createMacPermissionSetup({ dialog, systemPreferences, desktopCapturer, 
       case 2: await shell.openExternal(settingsPages.screen); break;
       case 3: await shell.openExternal(settingsPages.accessibility); break;
     }
-  };
+  }
 }
 
 module.exports = { createMacPermissionSetup };

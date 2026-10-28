@@ -1,0 +1,5 @@
+.app-error{min-height:100vh;display:grid;place-items:center;padding:24px;background:var(--bg);color:var(--text)}
+.app-error-card{max-width:520px;padding:28px;border:1px solid var(--line);border-radius:var(--radius-lg);background:var(--surface);box-shadow:var(--elev-1)}
+.app-error-card h1{margin:0 0 10px;font-size:var(--fs-heading)}
+.app-error-card p{margin:0 0 20px;color:var(--text-secondary);font-size:var(--fs-body);line-height:1.5}
+.app-error-actions{display:flex;gap:10px;flex-wrap:wrap}

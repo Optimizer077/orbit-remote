@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { ChevronDown, Eye, LoaderCircle, MousePointer2, X } from 'lucide-react';
+import { useWindowHidden } from './host-polling';
 import './viewed.css';
 
 /** One incoming session: another device is viewing (or controlling) THIS computer. */
@@ -17,13 +18,18 @@ export type ViewedBannerProps = {
 
 const FALLBACK_NAME = 'A paired device';
 
+/** Ticks once a second while `active`. Stopped while the native window is minimized or hidden, where nobody
+ *  can see the clock; it catches up at once when the window is shown again. */
 function useNow(active: boolean): number {
   const [now, setNow] = useState(() => Date.now());
+  const hidden = useWindowHidden();
+  const ticking = active && !hidden;
   useEffect(() => {
-    if (!active) return;
+    if (!ticking) return;
+    setNow(Date.now());
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
-  }, [active]);
+  }, [ticking]);
   return now;
 }
 

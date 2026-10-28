@@ -314,13 +314,18 @@ internal sealed partial class GpuMonitorCapture : IDisposable
         GpuColourPath colour = GpuColourPath.Auto, H264EncoderOptions? options = null)
         => GpuStreamEncoder.Create(this, width, height, fps, bitrateBps, colour, options, out reason);
 
-    /// <summary>Device state a new encoder binds to, read atomically with the generation it belongs to.</summary>
-    internal (string Generation, IntPtr Device, IntPtr Context, IntPtr Manager, int Width, int Height, long Luid, uint Vendor) Binding()
+    /// <summary>
+    /// Device state a new encoder binds to, read atomically with the generation it belongs to. Device, Context and
+    /// Manager are AddRef'd under the gate (zero when the capture is lost) and released when the caller disposes the
+    /// binding: a recovery or Dispose on the producer thread may release the capture's own references at any time after
+    /// this returns, and the encoder only takes its own references (QueryInterface, AddRef) later.
+    /// </summary>
+    internal GpuBinding Binding()
     {
         lock (gate)
         {
             ObjectDisposedException.ThrowIf(disposed, this);
-            return (Generation, device, context, manager, Width, Height, AdapterLuid, AdapterVendorId);
+            return new GpuBinding(Generation, device, context, manager, Width, Height, AdapterLuid, AdapterVendorId);
         }
     }
 

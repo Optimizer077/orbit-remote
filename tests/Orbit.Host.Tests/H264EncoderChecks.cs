@@ -40,7 +40,7 @@ public static class H264EncoderChecks
     }
 
     /// <summary>Pure managed parts (NV12 conversion, NAL and SPS parsing) that run on every OS.</summary>
-    private static void RunPortable(Action<bool, string> check)
+    internal static void RunPortable(Action<bool, string> check)
     {
         // An MFT that holds pictures (Qualcomm: two) is never waited on for more than one output per submit.
         check(MfH264Encoder.OutputsToAwait(0, 0) == 1 && MfH264Encoder.OutputsToAwait(1, 0) == 1 && MfH264Encoder.OutputsToAwait(2, 0) == 1
@@ -78,7 +78,7 @@ public static class H264EncoderChecks
 
         // Every vector path must be bit-identical to the scalar reference, including odd widths and the right-edge tail.
         // Vector128 is the Windows-on-ARM (NEON) path; forcing it on x64 runs the same code on SSE.
-        foreach (var (vw, vh) in new[] { (1920, 1080), (1001, 777), (17, 5), (33, 34) })
+        foreach (var (vw, vh) in new[] { (1920, 1080), (1001, 777), (17, 5), (33, 34), (1, 1), (7, 3), (8, 2), (9, 3), (15, 5), (16, 2), (24, 6), (25, 7) })
         {
             var frame = JpegEncoderChecks.PhotoLike(vw, vh, 11);
             int ew = vw + (vw & 1), eh = vh + (vh & 1);
@@ -91,6 +91,28 @@ public static class H264EncoderChecks
                 check(output.AsSpan().SequenceEqual(scalar), $"NV12: {kernel} conversion equals scalar reference at {vw}x{vh} (Auto = {MfH264Encoder.AutoKernel})");
             }
         }
+
+        // Random channels catch coefficient/rounding mistakes that smooth test images
+        // can miss. Offset the source and guard the output to exercise unaligned
+        // loads, every SIMD tail, replicated odd edges and band boundaries.
+        var random = new Random(7726);
+        var randomMatches = true;
+        foreach (var vw in Enumerable.Range(1, 40))
+        foreach (var vh in new[] { 1, 2, 3, 33 })
+        {
+            int ew = vw + (vw & 1), eh = vh + (vh & 1), length = ew * eh * 3 / 2;
+            var source = new byte[vw * vh * 4 + 13]; random.NextBytes(source);
+            var scalar = Enumerable.Repeat((byte)0xA5, length + 16).ToArray();
+            MfH264Encoder.ConvertBgraToNv12(source.AsMemory(7, vw * vh * 4), vw, vh, scalar, ew, eh, maxBands: 1, kernel: Nv12Kernel.Scalar);
+            foreach (var bands in new[] { 1, 4 })
+            {
+                var vector = Enumerable.Repeat((byte)0xA5, length + 16).ToArray();
+                MfH264Encoder.ConvertBgraToNv12(source.AsMemory(7, vw * vh * 4), vw, vh, vector, ew, eh, maxBands: bands);
+                randomMatches &= vector.AsSpan().SequenceEqual(scalar)
+                    && vector.AsSpan(length).IndexOfAnyExcept((byte)0xA5) < 0;
+            }
+        }
+        check(randomMatches, "NV12: random unaligned SIMD blocks/tails and parallel bands match scalar without overwriting output guards");
 
         byte[] stream = [0, 0, 0, 1, 0x67, 0x4D, 0x40, 0x28, 0, 0, 1, 0x68, 0xEE, 0, 0, 0, 1, 0x65, 0x88, 0x84];
         var nals = MfH264Encoder.EnumerateNalUnits(stream);

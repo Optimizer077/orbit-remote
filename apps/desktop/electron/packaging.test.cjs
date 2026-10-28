@@ -20,6 +20,21 @@ function binary(runtime) {
   return data;
 }
 
+test('packaging ships the third-party licence notices with the host', async () => {
+  // Load the real builder config without electron-builder installed: only Arch is used at load time.
+  const Module = require('node:module');
+  const load = Module._load;
+  Module._load = function (request, ...rest) { return request === 'builder-util' ? { Arch: {} } : load.call(this, request, ...rest); };
+  let config;
+  try { config = require('../electron-builder.cjs'); } finally { Module._load = load; }
+  const notices = config.extraResources.find(resource => resource.to === 'THIRD_PARTY_NOTICES.md');
+  assert.ok(notices, 'extraResources includes THIRD_PARTY_NOTICES.md');
+  const text = await fs.readFile(path.resolve(__dirname, '..', notices.from), 'utf8');
+  assert.match(text, /BouncyCastle\.Cryptography 2\.7\.0/);
+  assert.match(text, /The Legion of the Bouncy Castle Inc\./);
+  assert.match(text, /Permission is hereby granted, free of charge/);
+});
+
 test('packaging identifies native PE, Mach-O and ELF architectures', () => {
   for (const runtime of ['win-x64', 'win-arm64', 'osx-x64', 'osx-arm64', 'linux-x64', 'linux-arm64']) assert.equal(binaryRuntime(binary(runtime)), runtime);
   assert.throws(() => binaryRuntime(Buffer.from('broken')), /truncated/);

@@ -59,6 +59,18 @@ test('an invitation reusing a saved device ID with a different certificate canno
   assert.equal(controller.connections.length, 1);
 });
 
+test('status carries the host Tailscale state and omits it for older hosts', async () => {
+  const controller = new OrbitController({ directory: os.tmpdir(), controlToken: 'test' });
+  for (const state of ['connected', 'off', 'not-found', 'unknown']) {
+    controller.local = async () => ({ hostId: 'h', hostName: 'Generated host', transport: { mode: state === 'connected' ? 'tailscale' : 'offline', state, error: 'Generated detail.' } });
+    assert.equal((await controller.status()).host.tailscale.state, state);
+  }
+  controller.local = async () => ({ hostId: 'h', hostName: 'Generated host', transport: { mode: 'offline', error: 'Could not verify Tailscale status. Remote listening is disabled.' } });
+  const legacy = (await controller.status()).host.tailscale;
+  assert.equal('state' in legacy, false, 'an older host without state stays on the renderer text fallback');
+  assert.match(legacy.error, /Could not verify Tailscale status/);
+});
+
 function deferred() {
   let resolve, reject;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });

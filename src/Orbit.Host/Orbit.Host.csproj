@@ -5,9 +5,23 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <AssemblyName>Orbit.Host</AssemblyName>
+    <!-- Records the exact resolved package and its content hash (packages.lock.json); in CI a
+         restore that does not match it fails instead of updating it. RID-specific publish restores
+         (scripts/build.*, -r <rid>) use a throwaway lock file under obj/ so they never rewrite the
+         committed RID-less one; the exact [2.7.0] version pin still applies to them. -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <NuGetLockFilePath Condition="'$(RuntimeIdentifier)$(RuntimeIdentifiers)' != ''">$(BaseIntermediateOutputPath)packages.rid.lock.json</NuGetLockFilePath>
+    <RestoreLockedMode Condition="'$(CI)' == 'true' and '$(RuntimeIdentifier)$(RuntimeIdentifiers)' == ''">true</RestoreLockedMode>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)' == 'Diagnostic'">
     <DefineConstants>$(DefineConstants);ORBIT_DIAGNOSTICS</DefineConstants>
     <Optimize>true</Optimize>
   </PropertyGroup>
+  <ItemGroup>
+    <!-- EXPERIMENTAL F33 short-code pairing only (SRP-6a, RFC 5054 3072-bit group, SHA-256).
+         Exact pin, MIT licence. Release 2.7.0 lacks upstream SRP exponent blinding
+         (bc-csharp 08f34d11), so enabling F33 by default stays blocked; see
+         docs/PROTOCOL.md. -->
+    <PackageReference Include="BouncyCastle.Cryptography" Version="[2.7.0]" />
+  </ItemGroup>
 </Project>

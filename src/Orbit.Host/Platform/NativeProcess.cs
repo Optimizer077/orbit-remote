@@ -28,7 +28,8 @@ internal static class NativeProcess
             await Task.WhenAll(output, errors, write, process.WaitForExitAsync(deadline.Token));
             var bytes = await output;
             var error = await errors;
-            if (process.ExitCode != 0) throw new PlatformUnavailableException("tool-failed",
+            // Tool stderr can name displays, paths or libraries: keep it local-only.
+            if (process.ExitCode != 0) throw new PlatformUnavailableException("tool-failed", "A desktop utility failed.",
                 $"{Path.GetFileName(executable)} failed (exit {process.ExitCode}): {Encoding.UTF8.GetString(error).Trim()}");
             return bytes;
         }

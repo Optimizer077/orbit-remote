@@ -18,6 +18,26 @@ public static class Security
         if (a is null || b is null || a.Length > 4096 || b.Length > 4096) return false;
         return CryptographicOperations.FixedTimeEquals(SHA256.HashData(Encoding.UTF8.GetBytes(a)), SHA256.HashData(Encoding.UTF8.GetBytes(b)));
     }
+    /// <summary>
+    /// Display names shown to people. Refuses control characters, every Unicode
+    /// format character (category Cf: bidi embedding/override/isolate, zero-width
+    /// space/joiners, word joiner U+2060, BOM U+FEFF, Arabic letter mark U+061C and
+    /// others) except the plain direction marks LRM/RLM (U+200E/U+200F), the line
+    /// and paragraph separators U+2028/U+2029, and invalid UTF-16.
+    /// </summary>
+    public static bool IsSafeDisplayText(string text)
+    {
+        var remaining = text.AsSpan();
+        while (!remaining.IsEmpty)
+        {
+            if (Rune.DecodeFromUtf16(remaining, out var rune, out var consumed) != System.Buffers.OperationStatus.Done) return false;
+            remaining = remaining[consumed..];
+            var category = Rune.GetUnicodeCategory(rune);
+            if (category is System.Globalization.UnicodeCategory.Control or System.Globalization.UnicodeCategory.LineSeparator or System.Globalization.UnicodeCategory.ParagraphSeparator) return false;
+            if (category == System.Globalization.UnicodeCategory.Format && rune.Value is not (0x200C or 0x200D or 0x200E or 0x200F)) return false;
+        }
+        return true;
+    }
     public static bool IsTailscaleAddress(IPAddress address)
     {
         if (address.IsIPv4MappedToIPv6) address = address.MapToIPv4();
@@ -59,11 +79,21 @@ public static class Security
     {
         if (string.IsNullOrWhiteSpace(name) || name.Length > 180 || name is "." or ".." || name.Contains('/') || name.Contains('\\') || name.Contains(':') || name.Any(c => c < 32) || name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || name.EndsWith('.') || name.EndsWith(' '))
             throw new ArgumentException("Use a plain file name without directories.");
-        var stem = name.Split('.')[0].ToUpperInvariant();
-        if (new[] { "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9" }.Contains(stem))
-            throw new ArgumentException("Reserved file name.");
+        // Legacy Win32 path parsing ignores trailing spaces and dots before the
+        // extension, so "CON .txt" and "NUL. .log" still name a device there.
+        var stem = name.Split('.')[0].TrimEnd(' ', '.').ToUpperInvariant();
+        if (ReservedDeviceNames.Contains(stem)) throw new ArgumentException("Reserved file name.");
         return name;
     }
+
+    // Windows device names, including COM0/LPT0 and the superscript-digit forms
+    // (U+00B9, U+00B2, U+00B3) that Win32 also treats as COM/LPT ports.
+    private static readonly HashSet<string> ReservedDeviceNames = new(StringComparer.Ordinal)
+    {
+        "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "CLOCK$",
+        "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "COM¹", "COM²", "COM³",
+        "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", "LPT¹", "LPT²", "LPT³",
+    };
 
     public static string? SelectFrameMonitor(string? requestedMonitorId, string? sessionMonitorId)
     {

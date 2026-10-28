@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { HostSupervisor, NetworkChangeTracker, tailscaleObservation, BoundedHostLog, IdentityRotationGuard } = require('./host-supervisor.cjs');
+const { HostSupervisor, NetworkChangeTracker, tailscaleObservation, BoundedHostLog, IdentityRotationGuard, retryStep, retryRefusal } = require('./host-supervisor.cjs');
 
 test('crashes remain bounded even with a successful health response between every exit', () => {
   const supervisor = new HostSupervisor(); let now = 0;
@@ -37,14 +37,50 @@ test('failed health or a sleep-sized gap cannot count toward five continuous hea
   assert.equal(supervisor.snapshot().restartsLeft, 5);
 });
 
-test('Retry is offered only after recovery or terminal stop, never for a healthy host', () => {
+test('Retry is offered after recovery, terminal stop, or without remote listening, never for a running host', () => {
   const supervisor = new HostSupervisor(); assert.equal(supervisor.canRetry(), false);
   supervisor.healthy(0, true); assert.equal(supervisor.canRetry(), false);
-  supervisor.healthy(1, false); assert.equal(supervisor.canRetry(), false);
+  supervisor.healthy(1, false); assert.equal(supervisor.canRetry(), true, 'Tailscale was off at start: a restart is the only way to detect it');
   supervisor.exited(2); assert.equal(supervisor.canRetry(), true);
   supervisor.started(); assert.equal(supervisor.canRetry(), false);
   for (let i = 0; i < 7; i++) supervisor.exited(i + 3);
   assert.equal(supervisor.snapshot().state, 'stopped'); assert.equal(supervisor.canRetry(), true);
+});
+
+test('checking for Tailscale again restarts a healthy offline host once and never a running one', () => {
+  const live = { exitCode: null }, stopping = { exitCode: null, orbitStopping: true }, exited = { exitCode: 0 };
+  const supervisor = new HostSupervisor(); supervisor.started(); supervisor.healthy(0, false);
+  assert.equal(supervisor.snapshot().state, 'offline');
+  assert.equal(retryStep(supervisor.canRetry(), live), 'stop', 'the live offline host is stopped so a fresh one re-detects Tailscale');
+  supervisor.retry(1); supervisor.stopping('Checking for Tailscale again.');
+  assert.equal(retryStep(supervisor.canRetry(), stopping), 'mark', 'a second request while stopping does not stop twice');
+  supervisor.started(); assert.equal(retryStep(supervisor.canRetry(), live), 'none', 'a starting host is left alone');
+  supervisor.healthy(2, true);
+  assert.deepEqual(supervisor.snapshot(), { state: 'running', reason: null, restartsLeft: 6, nextRetryAt: null });
+  assert.equal(retryStep(supervisor.canRetry(), live), 'none', 'a running host is never restarted from the UI');
+  supervisor.healthy(3, false); supervisor.exited(4);
+  assert.equal(retryStep(supervisor.canRetry(), exited), 'start');
+  assert.equal(retryStep(supervisor.canRetry(), null), 'start');
+});
+
+test('a UI restart of an offline host is allowed only when Tailscale was truly off and nothing else explains it', () => {
+  const tailscaleOff = { transport: { mode: 'offline' }, identity: { expired: false }, sessions: [] };
+  const base = { state: 'offline', rawStatus: tailscaleOff, now: 100000 };
+  assert.equal(retryRefusal(base), null, 'Tailscale off, identity valid, nobody connected: restart may look again');
+  assert.equal(retryRefusal({ ...base, rawStatus: null }), 'status_unknown', 'no raw status yet: never guess');
+  assert.equal(retryRefusal({ ...base, rawStatus: { ...tailscaleOff, identity: { expired: true } } }), 'identity_expired');
+  assert.equal(retryRefusal({ ...base, rawStatus: { ...tailscaleOff, transport: { mode: 'tailscale' } } }), 'identity_rotating',
+    'Tailscale up but not listening means an identity rotation, which a restart cannot help');
+  assert.equal(retryRefusal({ ...base, rotationInFlight: true }), 'identity_rotating');
+  assert.equal(retryRefusal({ ...base, rawStatus: { ...tailscaleOff, sessions: [{ id: 's1' }] } }), 'sessions_active', 'never restart under a connected device');
+});
+
+test('owner-requested restarts are at least 10 s apart, whatever the host state', () => {
+  const tailscaleOff = { transport: { mode: 'offline' }, identity: { expired: false }, sessions: [] };
+  assert.equal(retryRefusal({ state: 'offline', rawStatus: tailscaleOff, lastManualAt: 100000, now: 109999 }), 'too_soon');
+  assert.equal(retryRefusal({ state: 'stopped', rawStatus: null, lastManualAt: 100000, now: 105000 }), 'too_soon');
+  assert.equal(retryRefusal({ state: 'offline', rawStatus: tailscaleOff, lastManualAt: 100000, now: 110000 }), null);
+  assert.equal(retryRefusal({ state: 'stopped', rawStatus: null, lastManualAt: null, now: 0 }), null, 'a stopped host keeps its existing Retry');
 });
 
 test('only two consecutive positive address changes trigger rebind; failures are unknown', () => {

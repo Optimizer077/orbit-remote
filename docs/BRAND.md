@@ -17,10 +17,25 @@ outline, or third-party logo is embedded.
 - [Default wordmark, for dark surfaces](assets/brand/logo.svg)
 - [Light-surface wordmark](assets/brand/logo-light.svg)
 - [Midnight wordmark](assets/brand/logo-midnight.svg)
-- [Standalone mint mark](assets/brand/mark.svg)
+- [Standalone teal mark](assets/brand/mark.svg)
 - [Canonical app icon](../apps/desktop/build/icons/icon.svg)
 - [Native icon size preview](assets/brand/icon-preview.png)
 - [Complete identity sheet](assets/brand/brand-sheet.png)
+
+**Logo colours.** The mark is vivid teal and the wordmark ink is deep navy or
+near-white, taken from the Daylight and Graphite theme tokens. The geometry is
+unchanged from the original mint mark; only the colours moved.
+
+| Use | Mark and dot | Wordmark ink | Contrast of mark (WCAG non-text, 3:1) |
+|---|---|---|---|
+| Light surfaces (`logo-light.svg`, `mark-light.svg`) | `#008577` (Daylight accent) | `#0b1d3a` | 4.54:1 on `#ffffff`, 4.01:1 on `#edf1f7` |
+| Dark and navy surfaces (`logo.svg`, `logo-dark.svg`, `mark.svg`) | `#2dd4bf` (sidebar accent) | `#f4f7fb` | 9.02:1 on navy `#0b1d3a`, 9.80:1 on Graphite `#0f1522`, 10.57:1 on `#070b14` |
+| App icon and Windows/Linux tray tile | `#2dd4bf` on a `#0b1d3a` → `#070b14` navy tile | none | 9.02:1 at the top of the tile, 10.57:1 at the bottom |
+| Midnight (`logo-midnight.svg`, `mark-midnight.svg`) | `#aecaff` | `#f4f7fb` | unchanged |
+
+In the app, `BrandMark` and `BrandWordmark` take their colour from the theme's
+`--accent` and `--text` tokens, so the sidebar mark is `#2dd4bf` on Daylight's
+navy sidebar and `#1fd6b9` on Graphite (10.66:1 on `#070b14`).
 
 Keep the original proportions and at least one central-dot diameter of clear
 space around the mark. Use the complete wordmark at 165px wide or larger; use
@@ -35,31 +50,46 @@ is 1024px with alpha.
 **Optical sizes.** At 48px and below, icons are drawn for their pixel grid
 instead of being shrunk from the 1024px master, which would turn the stroke
 into a 0.4px smear at 16px. Strokes are set in target pixels (1.3px at 16,
-2.1px at 48), the mark grows slightly, and a faint mint edge keeps the tile
+2.1px at 48), the mark grows slightly, and a faint teal edge keeps the tile
 visible on dark taskbars up to 32px. At 24px the satellite is dropped. At
 16px only the orbit and centre node remain.
 
 Tray images follow Electron's 16px-at-1x convention. Windows/Linux use the
 small tiled icon (`tray.png` 16px, `@1.5x` 24px, `@2x` 32px), which stays
-visible on both light and dark taskbars; a bare mint glyph disappears on a
+visible on both light and dark taskbars; a bare teal glyph disappears on a
 light taskbar. macOS uses black template glyphs (`trayTemplate.png` 16px,
 `@2x` 32px) that the native application marks as templates so the menu bar
 chooses the contrast.
 
 ## Palette and type
 
-| Role | Orbit | Midnight | Paper |
-|---|---|---|---|
-| Background | `#101616` | `#101521` | `#f4f3ee` |
-| Surface | `#18231d` | `#172337` | `#fffefa` |
-| Primary text | `#eceee7` | `#eef2fb` | `#243329` |
-| Accent | `#b2e6c5` | `#aecaff` | `#286647` |
-| Accent ink | `#1c3524` | `#192c52` | `#ffffff` |
+The two default themes are bold: vivid teal from the eclipse mark on solid
+deep-navy chrome, solid primary buttons, crisp borders, and saturated status
+fills instead of tints and glows.
 
-These are the renderer's existing theme tokens. Additional foreground, border,
-danger, warning, and viewer colors live in `renderer/src/styles.css`; preserve
-their semantic roles when extending themes. Accent does not imply a successful
-connection: status must have a text label and use the real connection state.
+| Role | Daylight (light) | Graphite (dark) |
+|---|---|---|
+| Background | `#edf1f7` | `#0f1522` |
+| Sidebar | `#0b1d3a` (navy, light text) | `#070b14` |
+| Surface | `#ffffff` | `#1a2233` |
+| Primary text | `#0a1428` | `#f4f7fb` |
+| Accent / accent ink | `#008577` / `#ffffff` | `#1fd6b9` / `#03221d` |
+| Sidebar accent / ink | `#2dd4bf` / `#03201c` | same as accent |
+| Success fill / ink | `#037a4b` / `#ffffff` | `#3ddc84` / `#03230f` |
+| Warning fill / ink | `#f5a30a` / `#2a1700` | `#ffcb3d` / `#2b1b00` |
+| Danger fill / ink | `#d0261e` / `#ffffff` | `#f04438` / `#2b0604` |
+
+Midnight (`#0a1120` background, `#6ea9ff` accent), Paper (`#f5f1e9`,
+`#22744b`) and Ember (`#141010`, `#f0a04b`) keep their softer palettes.
+
+These are the renderer's theme tokens. Additional foreground, border,
+status-text, and viewer colors live in `renderer/src/styles.css`; preserve
+their semantic roles when extending themes. Every text pair meets WCAG AA 4.5:1
+and every component or focus colour 3:1; `node tests/theme-contrast.cjs` (from
+`apps/desktop`) checks the Daylight and Graphite pairs and the colour-blind
+separation of success, warning and danger. Accent does not imply a successful
+connection: status must have a text label and an icon, use the real connection
+state, and never rely on colour alone.
 
 Use the operating system's UI typeface: Segoe UI Variable / Segoe UI on Windows,
 the system font on macOS, and the desktop sans-serif fallback on Linux.
@@ -82,11 +112,15 @@ pixels or obscure control-release actions.
 ## Rebuild assets
 
 ```sh
-python -m pip install Pillow
-python docs/assets/brand/generate_brand.py
+uv run --no-project --with pillow python docs/assets/brand/generate_brand.py
+uv run --no-project --with pillow --with pymupdf python docs/assets/brand/generate_brand_sheet.py
 ```
 
-The generator draws matching SVG, PNG, ICO, and ICNS files from original
-geometry. SVG stays editable as source. Review `icon-preview.png` after any
-change, especially at 16px and 32px, and review template contrast in the real
-macOS menu bar.
+The first generator draws matching SVG, PNG, ICO, and ICNS files from original
+geometry; the colours are the named constants at its top. The second rebuilds
+`brand-sheet.png` and `logo-preview.png` from those files. The README diagrams
+in `docs/assets/diagrams/` draw the mark in the same teal family (`mint` in
+their `THEMES`: `#2dd4bf` on `#0c463f` dark, `#00756a` on `#ccf2eb` light);
+rerun their generators after a palette change. SVG stays editable as source.
+Review `icon-preview.png` after any change, especially at 16px and 32px, and
+review template contrast in the real macOS menu bar.

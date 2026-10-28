@@ -20,7 +20,7 @@
 /* Overlay (reconnecting / ended): blocks input to the stale image, keeps it visible. */
 .hud-veil{position:absolute;inset:0;z-index:1;display:grid;place-items:center;padding:110px 24px 24px;
   background:radial-gradient(ellipse at center,color-mix(in srgb,var(--viewer-bg,#000) 30%,transparent),color-mix(in srgb,var(--viewer-bg,#000) 55%,transparent))}
-.hud-card{width:min(420px,100%);text-align:center;padding:24px 26px 22px;border-radius:var(--radius-xl,18px);
+.hud-card{width:min(420px,100%);text-align:center;padding:24px;border-radius:var(--viewer-radius-panel,var(--radius-xl,18px));
   background:linear-gradient(180deg,var(--hud-glass-a),var(--hud-glass-b));border:1px solid var(--hud-edge);
   -webkit-backdrop-filter:blur(22px) saturate(1.5);backdrop-filter:blur(22px) saturate(1.5);
   box-shadow:var(--elev-3,0 18px 48px rgb(0 0 0 / .32)),inset 0 1px 0 color-mix(in srgb,#fff 10%,transparent);color:var(--text);
@@ -36,7 +36,7 @@
 /* Floating bar */
 .hud-bar{position:absolute;z-index:3;top:12px;left:50%;transform:translate(-50%,0);
   width:max-content;max-width:calc(100% - 24px);display:flex;flex-direction:column;align-items:stretch;
-  padding:6px;border-radius:var(--radius-xl,18px);color:var(--text);
+  padding:8px;border-radius:var(--viewer-radius-panel,var(--radius-xl,18px));color:var(--text);
   background:linear-gradient(180deg,var(--hud-glass-a),var(--hud-glass-b));border:1px solid var(--hud-edge);
   -webkit-backdrop-filter:blur(20px) saturate(1.6);backdrop-filter:blur(20px) saturate(1.6);
   box-shadow:var(--elev-3,0 16px 40px rgb(0 0 0 / .3)),inset 0 1px 0 color-mix(in srgb,#fff 10%,transparent);
@@ -45,6 +45,14 @@
 .hud-handle{position:absolute;z-index:2;top:6px;left:50%;width:44px;height:6px;margin-left:-22px;border-radius:99px;pointer-events:none;
   background:var(--hud-glass-a);border:1px solid var(--hud-edge);box-shadow:var(--elev-1,0 2px 6px rgb(0 0 0 / .25));opacity:0;transition:opacity .3s ease}
 .hud-handle[data-shown="true"]{opacity:.9}
+/* Controlling with the toolbar hidden: the handle becomes a compact, opaque reminder. Clicks pass through. */
+.hud-handle[data-control]{top:6px;width:auto;height:26px;margin-left:0;transform:translateX(-50%);display:inline-flex;align-items:center;gap:6px;
+  padding:0 3px 0 9px;font-size:12px;font-weight:600;line-height:1;white-space:nowrap;color:var(--text);
+  background:var(--surface-raised);border-color:color-mix(in srgb,var(--accent) 60%,var(--line-strong));box-shadow:var(--elev-2,0 6px 18px rgb(0 0 0 / .28))}
+.hud-handle[data-control][data-shown="true"]{opacity:1}
+.hud-handle[data-control]>svg{flex-shrink:0;color:var(--accent-text,var(--accent))}
+.hud-handle[data-control] kbd{font:inherit;font-size:12px;font-weight:600;line-height:1;padding:3px 6px;border-radius:99px;color:var(--text);
+  background:var(--surface);border:1px solid var(--line-strong)}
 
 /* Status row */
 .hud-status{display:flex;align-items:center;gap:6px;min-width:0;padding:2px 4px 6px 6px;font-size:12px;line-height:1.2;color:var(--text-secondary)}
@@ -79,7 +87,7 @@
 .q-slow .hud-bars>i[data-on="true"]{background:var(--danger-text)}
 .q-fair{color:var(--warning-text)}.q-slow{color:var(--danger-text)}.q-unknown{color:var(--text-secondary);font-weight:500}
 .hud-tip{position:absolute;top:calc(100% + 10px);left:50%;transform:translate(-50%,-4px);z-index:5;width:300px;display:flex;flex-direction:column;gap:6px;
-  padding:12px 14px;border-radius:var(--radius-md,12px);font-size:12px;line-height:1.35;color:var(--text-secondary);text-align:left;white-space:normal;
+  padding:12px 16px;border-radius:var(--viewer-radius-panel,var(--radius-md,12px));font-size:12px;line-height:1.35;color:var(--text-secondary);text-align:left;white-space:normal;
   background:var(--surface-raised);border:1px solid var(--line-strong);box-shadow:var(--elev-3,0 16px 40px rgb(0 0 0 / .3));
   opacity:0;visibility:hidden;pointer-events:none;transition:opacity .15s ease,transform .2s var(--hud-ease),visibility 0s .15s}
 .hud-meter-wrap:hover .hud-tip,.hud-meter:focus-visible+.hud-tip,.hud-tip[data-open="true"]{opacity:1;visibility:visible;transform:translate(-50%,0);transition-delay:0s}
@@ -92,17 +100,24 @@
 /* Toolbar row: restyles the existing session-toolbar controls for the glass bar. */
 .hud-toolbar{display:flex;align-items:center;flex-wrap:wrap;justify-content:center;gap:4px;padding-top:6px;border-top:1px solid var(--line)}
 .hud-toolbar .toolbar-group{display:flex;align-items:center;gap:2px;color:var(--text-muted)}
-.hud-toolbar .toolbar-group:has(select){gap:6px;height:34px;padding:0 6px 0 11px;border-radius:99px;background:var(--hud-inset);border:1px solid var(--line)}
-.hud-toolbar .toolbar-group:has(.toolbar-button.selected){padding:2px;border-radius:99px;background:var(--hud-inset);border:1px solid var(--line)}
+.hud-toolbar .toolbar-group:has(select){gap:8px;height:34px;padding:0 8px 0 12px;border-radius:var(--viewer-radius-group,99px);background:var(--hud-inset);border:1px solid var(--line)}
+.hud-toolbar .toolbar-group:has(.toolbar-button.selected){padding:2px;border-radius:var(--viewer-radius-group,99px);background:var(--hud-inset);border:1px solid var(--line)}
 .hud-toolbar .toolbar-group select{font-size:12px;color:var(--text);max-width:220px;background:none;border:0;cursor:pointer}
 .hud-toolbar .toolbar-group select option{background:var(--surface-raised);color:var(--text)}
-.hud-toolbar .toolbar-button{min-height:34px;padding:0 12px;gap:7px;border-radius:99px;font-size:12px;font-weight:500;color:var(--text-secondary)}
+.hud-toolbar .toolbar-button{min-height:34px;padding:0 12px;gap:8px;border-radius:var(--viewer-radius-control,99px);font-size:12px;font-weight:500;color:var(--text-secondary)}
 .hud-toolbar .toolbar-group:has(.toolbar-button.selected) .toolbar-button{min-height:28px;padding:0 11px}
 .hud-toolbar .toolbar-button:hover:not(:disabled){background:var(--surface-hover);color:var(--text)}
-.hud-toolbar .toolbar-button.selected{background:var(--surface-raised);color:var(--text);box-shadow:var(--elev-1,0 1px 3px rgb(0 0 0 / .2)),inset 0 0 0 1px var(--line-strong)}
+.hud-toolbar .toolbar-button.selected{background:var(--surface-raised);color:var(--accent-text);font-weight:500;box-shadow:var(--elev-1,0 1px 3px rgb(0 0 0 / .2)),inset 0 0 0 1px var(--accent)}
+/* Remote tools (clipboard, files, power) are one icon cluster; names stay in aria-label and the tooltip. */
+.hud-toolbar .toolbar-tool{min-width:34px;padding:0 9px}
+.hud-toolbar .toolbar-tool>span{display:none}
+/* Full-window viewing up to 1440 px: the leave-full-window toggle is icon-only so the toolbar keeps one row. */
+@media (max-width:1440px){.viewer-expanded .hud-toolbar .toolbar-layout{min-width:34px;padding:0 9px}.viewer-expanded .hud-toolbar .toolbar-layout>span{display:none}}
+/* Ending the session sits last, spaced apart from Take control. Spacing, not a divider, so a wrapped row never starts with a line. */
+.hud-toolbar .toolbar-end{margin-left:12px}
 .hud-toolbar .toolbar-spacer{flex:0 0 6px}
 .hud-toolbar .toolbar-divider{width:1px;height:22px;margin:0 4px;background:var(--line-strong)}
-.hud-toolbar .button.small{min-height:34px;padding:0 15px;border-radius:99px;font-size:12px}
+.hud-toolbar .button.small{min-height:34px;padding:0 16px;border-radius:var(--viewer-radius-control,99px);font-size:12px}
 .hud-bar :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .hud-toolbar .toolbar-group:has(select:focus-visible){outline:2px solid var(--accent);outline-offset:2px}
 .hud-toolbar .toolbar-group select:focus-visible{outline:0}
@@ -127,6 +142,25 @@
   .hud-toolbar .toolbar-button>span{display:none}
 }
 .hud-meter-wrap:hover .hud-tip[data-dismissed="true"],.hud-meter-wrap .hud-tip[data-dismissed="true"]{opacity:0;visibility:hidden}
+@media(max-width:640px){
+  .standalone-viewer .remote-session .hud-bar{max-width:calc(100% - 16px)}
+  .standalone-viewer .remote-session .hud-status{flex-wrap:wrap;row-gap:8px}
+  .standalone-viewer .remote-session .hud-status-fill{display:none}
+}
+/* Standalone recovery keeps every local control in one scroll surface at the
+   real720px pop-out minimum as well as narrow reflow widths. The veil grows to
+   cover the stage when its card is shorter than the remaining viewport. */
+.standalone-viewer .remote-session .hud:has(>.hud-veil){overflow-y:auto;overflow-x:hidden}
+.standalone-viewer .remote-session .hud:has(>.hud-veil)>.hud-stage{position:absolute;inset:0}
+/* Same left/transform as the live bar, so a live<->recovery switch never runs the .28s transform transition sideways. */
+.standalone-viewer .remote-session .hud:has(>.hud-veil)>.hud-bar{position:relative;inset:auto auto auto 50%;transform:translate(-50%,0);flex:none;order:1;align-self:flex-start;margin:8px 0 0}
+.standalone-viewer .remote-session .hud:has(>.hud-veil)>.hud-veil{position:relative;inset:auto;flex:1 0 auto;order:2;overflow:visible;padding:16px}
+/* Invisible absolute tooltips otherwise extend the recovery scroller beyond its
+   visible flow. Keep every explicit hover/focus/open path and Escape dismissal. */
+.standalone-viewer .remote-session .hud:has(>.hud-veil) .hud-tip{display:none}
+.standalone-viewer .remote-session .hud:has(>.hud-veil) .hud-meter-wrap:hover .hud-tip:not([data-dismissed="true"]),
+.standalone-viewer .remote-session .hud:has(>.hud-veil) .hud-meter:focus-visible+.hud-tip:not([data-dismissed="true"]),
+.standalone-viewer .remote-session .hud:has(>.hud-veil) .hud-tip[data-open="true"]:not([data-dismissed="true"]){display:flex}
 /* Pop-out screen windows: the HUD wrappers must fill the remaining height so the status bar stays visible. */
 .standalone-viewer .hud{flex:1;min-height:0;display:flex;flex-direction:column}
 .standalone-viewer .hud-stage{flex:1;min-height:0;display:flex;flex-direction:column}

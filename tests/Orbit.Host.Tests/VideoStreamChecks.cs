@@ -27,6 +27,7 @@ public static class VideoStreamChecks
 
     public static async Task RunAsync(Action<bool, string> check)
     {
+        await Section(check, "NV12 conversion", () => { H264EncoderChecks.RunPortable(check); return Task.CompletedTask; });
         await Section(check, "wire", () => { WireChecks(check); return Task.CompletedTask; });
         await Section(check, "writer", () => WriterChecks(check));
         await Section(check, "parsing", () => { ParsingChecks(check); return Task.CompletedTask; });
@@ -236,7 +237,8 @@ public static class VideoStreamChecks
 
         await using (var h = new Harness(new SyntheticSource(64, 48)))
         {
-            await Task.Delay(520);
+            // Wait for the heartbeats rather than a fixed time, so a slow start under load cannot miss one.
+            await Until(() => h.Records().Count(r => r.Type == 3) >= 2, 2000);
             var records = h.Records(out var violation);
             check(violation is null && records.Count(r => r.Type == 2) == 1 && records.Count(r => r.Type == 3) >= 2 && h.Run.EncodeCount == 1, "Idle: unchanged content is encoded once, then heartbeats (no access units)");
             var heartbeats = records.Where(r => r.Type == 3).Select(r => r.Timestamp).ToArray();

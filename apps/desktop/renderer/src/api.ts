@@ -9,11 +9,11 @@ export type Permissions = {
   power: boolean;
 };
 
-export type ResolvedTheme = 'daylight' | 'graphite' | 'midnight' | 'paper';
+export type ResolvedTheme = 'daylight' | 'graphite' | 'midnight' | 'paper' | 'ember';
 export type ThemePreference = ResolvedTheme | 'system';
 export const THEME_STORAGE_KEY = 'orbit.theme';
-const THEME_KEYS = new Set<ThemePreference>(['daylight', 'graphite', 'midnight', 'paper', 'system']);
-const DARK_THEMES = new Set<ResolvedTheme>(['graphite', 'midnight']);
+const THEME_KEYS = new Set<ThemePreference>(['daylight', 'graphite', 'midnight', 'paper', 'ember', 'system']);
+const DARK_THEMES = new Set<ResolvedTheme>(['graphite', 'midnight', 'ember']);
 
 // Missing, unknown and legacy values (the removed 'orbit' theme) follow the system.
 export function readThemePreference(): ThemePreference {
@@ -77,6 +77,8 @@ export type HostSettings = {
 
 export type HostRuntime = {
   supervisor?: { state: 'starting' | 'running' | 'offline' | 'reconnecting' | 'stopped'; reason?: string | null; restartsLeft: number; nextRetryAt?: string | null };
+  /** Set by host.retry when main declined to restart (see retryRefusal in host-supervisor.cjs). */
+  retryRefused?: 'too_soon' | 'status_unknown' | 'identity_expired' | 'identity_rotating' | 'sessions_active';
   identity?: { expiresAt: string; daysRemaining: number; warning: boolean; expired: boolean } | null;
 };
 
@@ -97,6 +99,8 @@ export type HostStatus = HostRuntime & {
       dnsName?: string;
       version?: string;
       error?: string;
+      /** Host's stable discovery state; absent on older hosts. `error` is human text only. */
+      state?: 'connected' | 'off' | 'not-found' | 'unknown' | 'loopback-test';
     };
   };
   capabilities: {
@@ -203,6 +207,11 @@ export const api = {
     return Array.isArray(result) ? result : result.monitors || [];
   },
 };
+
+export async function copyText(value: string) {
+  if (!value) return;
+  await invoke('clipboard.local.write', { text: value });
+}
 
 export function errorMessage(error: unknown): string {
   if (error && typeof error === 'object' && (error as { status?: unknown }).status === undefined &&

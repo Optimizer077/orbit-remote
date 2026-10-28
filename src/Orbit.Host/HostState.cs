@@ -9,7 +9,10 @@ public sealed class HostState
 {
     public const int MaximumSessions = 8;
     public const int MaximumSessionsPerDevice = 2;
+    /// <summary>Size at which audit.jsonl is rotated to audit.1.jsonl; at most two files are kept.</summary>
+    internal const long AuditRotationBytes = 256 * 1024;
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { WriteIndented = true };
+    private static readonly JsonSerializerOptions AuditJson = new(Json) { WriteIndented = false };
     private readonly object gate = new();
     private readonly string directory;
     private readonly TimeProvider clock;
@@ -17,6 +20,16 @@ public sealed class HostState
     private readonly Dictionary<string, RemoteSession> sessions = [];
     private readonly List<AuditEvent> audit = [];
     private PersistedState state;
+    private long auditFileBytes;
+    /// <summary>Window in which repeated per-device events of one kind are written once.</summary>
+    internal static readonly TimeSpan AuditCoalesceWindow = TimeSpan.FromMinutes(1);
+    private const int MaximumCoalescedKeys = 256;
+    private readonly Dictionary<string, CoalescedEvent> coalesced = new(StringComparer.Ordinal);
+    private DateTimeOffset nextAuditFailureReport = DateTimeOffset.MinValue;
+    /// <summary>Receives local-only reports of audit write failures, at most once a minute.</summary>
+    internal Action<string>? AuditWriteFailed { get; set; }
+    /// <summary>Test seam for <see cref="AuditRotationBytes"/>.</summary>
+    internal long AuditRotationLimit { get; set; } = AuditRotationBytes;
     public string HostId => state.HostId;
     public string HostName { get { lock (gate) return state.Settings.HostName ?? Environment.MachineName; } }
     public HostSettings Settings { get { lock (gate) return state.Settings; } }
@@ -34,11 +47,12 @@ public sealed class HostState
                 state.Devices[index] = state.Devices[index] with { ResumeEpoch = Security.RandomToken() };
         Save();
         var auditPath = Path.Combine(directory, "audit.jsonl");
-        if (File.Exists(auditPath))
-        {
-            foreach (var line in File.ReadLines(auditPath).TakeLast(500))
-                try { var entry = JsonSerializer.Deserialize<AuditEvent>(line, Json); if (entry is not null) audit.Add(entry); } catch (JsonException) { }
-        }
+        var previousAuditPath = Path.Combine(directory, "audit.1.jsonl");
+        var lines = (File.Exists(previousAuditPath) ? File.ReadLines(previousAuditPath) : [])
+            .Concat(File.Exists(auditPath) ? File.ReadLines(auditPath) : []);
+        foreach (var line in lines.TakeLast(500))
+            try { var entry = JsonSerializer.Deserialize<AuditEvent>(line, Json); if (entry is not null) audit.Add(entry); } catch (JsonException) { }
+        auditFileBytes = File.Exists(auditPath) ? new FileInfo(auditPath).Length : 0;
     }
     public PairedDevice[] Devices { get { lock (gate) return state.Devices.ToArray(); } }
     public RemoteSession[] Sessions { get { lock (gate) { ExpireSessions(); return sessions.Values.ToArray(); } } }
@@ -46,7 +60,7 @@ public sealed class HostState
     public PairedDevice? FindDevice(string fingerprint) { lock (gate) return state.Devices.FirstOrDefault(d => d.Fingerprint == fingerprint && d.RevokedAt is null); }
     public void UpdateSettings(HostSettings settings)
     {
-        if (settings.HostName is { } name && (string.IsNullOrWhiteSpace(name) || name.Length > 80 || name.Any(char.IsControl))) throw new ArgumentException("Host name must contain 1 to 80 printable characters.");
+        if (settings.HostName is { } name && (string.IsNullOrWhiteSpace(name) || name.Length > 80 || !Security.IsSafeDisplayText(name))) throw new ArgumentException("Host name must contain 1 to 80 printable characters.");
         if (settings.FileTransferEnabled)
         {
             if (string.IsNullOrWhiteSpace(settings.FileTransferRoot) || !Path.IsPathFullyQualified(settings.FileTransferRoot)) throw new ArgumentException("Choose an absolute dedicated file transfer folder.");
@@ -61,7 +75,7 @@ public sealed class HostState
     public InviteResult CreateInvite(InviteRequest request, string remoteAddress, string fingerprint)
     {
         if (request.Permissions is null || !request.Permissions.IsValid) throw new ArgumentException("Pairing requires explicit screen viewing permission; power permission also requires keyboard/mouse control.");
-        if (request.DeviceName is { } deviceName && (deviceName.Length > 80 || deviceName.Any(char.IsControl))) throw new ArgumentException("Device name must be at most 80 printable characters.");
+        if (request.DeviceName is { } deviceName && (deviceName.Length > 80 || !Security.IsSafeDisplayText(deviceName))) throw new ArgumentException("Device name must be at most 80 printable characters.");
         var secret = Security.RandomToken(); var expiry = clock.GetUtcNow().AddMinutes(5);
         lock (gate)
         {
@@ -76,17 +90,36 @@ public sealed class HostState
     }
     public PairedDevice Pair(PairRequest request, string fingerprint)
     {
-        if (string.IsNullOrWhiteSpace(request.Secret) || request.Secret.Length > 128 || string.IsNullOrWhiteSpace(request.DeviceName) || request.DeviceName.Length > 80 || request.DeviceName.Any(char.IsControl)) throw new ArgumentException("Invalid pairing request.");
+        if (string.IsNullOrWhiteSpace(request.Secret) || request.Secret.Length > 128 || string.IsNullOrWhiteSpace(request.DeviceName) || request.DeviceName.Length > 80 || !Security.IsSafeDisplayText(request.DeviceName)) throw new ArgumentException("Invalid pairing request.");
         lock (gate)
         {
             if (!invites.Remove(Security.HashToken(request.Secret), out var invite) || invite.ExpiresAt <= clock.GetUtcNow()) throw new UnauthorizedAccessException("The invite expired, was already used, or is invalid.");
-            var existing = state.Devices.FindIndex(d => d.Fingerprint == fingerprint);
-            var peer = new PairedDevice(existing >= 0 ? state.Devices[existing].Id : Guid.NewGuid().ToString("N"), string.IsNullOrWhiteSpace(invite.DeviceName) ? request.DeviceName.Trim() : invite.DeviceName.Trim(), fingerprint, invite.Permissions, clock.GetUtcNow(), ResumeEpoch: Security.RandomToken(), BlockedByOwner: existing >= 0 && state.Devices[existing].BlockedByOwner);
-            if (existing >= 0) state.Devices[existing] = peer; else state.Devices.Add(peer);
-            foreach (var session in sessions.Values.Where(session => session.DeviceId == peer.Id).ToArray()) sessions.Remove(session.Id);
-            Save(); AddAudit("device.paired", peer.Id, "Device certificate pinned after invite verification.");
-            return peer;
+            return Pin(fingerprint, string.IsNullOrWhiteSpace(invite.DeviceName) ? request.DeviceName.Trim() : invite.DeviceName.Trim(), invite.Permissions, "Device certificate pinned after invite verification.");
         }
+    }
+    /// <summary>EXPERIMENTAL (F33): pins a certificate after both short-code confirmations verified. The caller consumes the code.</summary>
+    internal PairedDevice PairShortCode(string fingerprint, string deviceName, DevicePermissions permissions)
+    {
+        if (!permissions.IsValid || string.IsNullOrWhiteSpace(deviceName) || deviceName.Length > 80 || !Security.IsSafeDisplayText(deviceName)) throw new ArgumentException("Invalid pairing request.");
+        lock (gate) return Pin(fingerprint, deviceName.Trim(), permissions, "Device certificate pinned after experimental short-code verification.");
+    }
+    private PairedDevice Pin(string fingerprint, string deviceName, DevicePermissions permissions, string auditDetail)
+    {
+        var existing = state.Devices.FindIndex(d => d.Fingerprint == fingerprint);
+        var peer = new PairedDevice(existing >= 0 ? state.Devices[existing].Id : Guid.NewGuid().ToString("N"), deviceName, fingerprint, permissions, clock.GetUtcNow(), ResumeEpoch: Security.RandomToken(), BlockedByOwner: existing >= 0 && state.Devices[existing].BlockedByOwner);
+        // A pin exists only once it is saved: if saving fails, restore the previous
+        // in-memory list so the certificate is not trusted until the next restart.
+        var previous = state.Devices.ToList();
+        if (existing >= 0) state.Devices[existing] = peer; else state.Devices.Add(peer);
+        try { Save(); }
+        catch
+        {
+            state.Devices.Clear(); state.Devices.AddRange(previous);
+            throw;
+        }
+        foreach (var session in sessions.Values.Where(session => session.DeviceId == peer.Id).ToArray()) sessions.Remove(session.Id);
+        AddAudit("device.paired", peer.Id, auditDetail);
+        return peer;
     }
     public bool Revoke(string id) => Revoke(id, out _);
     public bool Revoke(string id, out bool revokedControllingSession)
@@ -112,11 +145,14 @@ public sealed class HostState
             var permissions = viewOnly ? device.Permissions with { Control = false, Clipboard = false, Files = false, Power = false } : device.Permissions;
             if (sessions.Values.Count(session => session.DeviceId == device.Id) >= MaximumSessionsPerDevice)
                 throw new InvalidOperationException($"This device has reached its limit of {MaximumSessionsPerDevice} concurrent sessions. Close one of its sessions before connecting again.");
-            if (sessions.Count >= MaximumSessions) throw new InvalidOperationException("The host has reached its session limit.");
+            // One slot stays free for a control session, so paired viewers cannot lock
+            // out the controller; only one control session can exist at a time anyway.
+            if (sessions.Count >= MaximumSessions || !permissions.Control && sessions.Values.Count(s => !s.Permissions.Control) >= MaximumSessions - 1)
+                throw new InvalidOperationException("The host has reached its session limit.");
             if (permissions.Control && sessions.Values.Any(s => s.Permissions.Control)) throw new InvalidOperationException("Another control session is active. End it before starting a new control session.");
             var now = clock.GetUtcNow();
             var session = new RemoteSession(Guid.NewGuid().ToString("N"), device.Id, device.Name, monitorId, permissions, now, now.AddHours(2), now, ResumeEpoch: device.ResumeEpoch);
-            sessions.Add(session.Id, session); AddAudit("session.started", device.Id, "Remote desktop session started."); return session;
+            sessions.Add(session.Id, session); AddCoalescedAudit("session.started", device.Id, "Remote desktop session started."); return session;
         }
     }
     public RemoteSession? GetSession(string id, string deviceId)
@@ -144,7 +180,7 @@ public sealed class HostState
                 AddAudit("session.ended", session.DeviceId, "Owner ended the session and blocked its device until explicitly allowed again.");
                 return true;
             }
-            sessions.Remove(id); AddAudit("session.ended", session.DeviceId, "Remote session ended."); return true;
+            sessions.Remove(id); AddCoalescedAudit("session.ended", session.DeviceId, "Remote session ended."); return true;
         }
     }
     public void TouchInput(string id)
@@ -212,11 +248,68 @@ public sealed class HostState
         lock (gate)
         {
             var entry = new AuditEvent(clock.GetUtcNow(), kind, deviceId, detail); audit.Add(entry); if (audit.Count > 500) audit.RemoveAt(0);
+            // Append one line per event; rotate to a single previous file so the
+            // on-disk log stays bounded at about twice AuditRotationLimit.
+            // The operation that produced this event has already committed, so a file
+            // failure is reported locally and never thrown back to it.
             var path = Path.Combine(directory, "audit.jsonl");
-            // Rewrite a bounded file so an unattended host cannot grow audit logs without limit.
-            File.WriteAllLines(path, audit.Select(e => JsonSerializer.Serialize(e, new JsonSerializerOptions(Json) { WriteIndented = false }))); Security.RestrictFile(path);
+            var line = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(entry, AuditJson) + "\n");
+            if (auditFileBytes > 0 && auditFileBytes + line.Length > AuditRotationLimit)
+            {
+                // A locked previous file only delays rotation; appending continues.
+                try { if (File.Exists(path)) File.Move(path, Path.Combine(directory, "audit.1.jsonl"), overwrite: true); auditFileBytes = 0; }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { ReportAuditFailure("rotate", ex); }
+            }
+            try
+            {
+                var created = !File.Exists(path);
+                var options = new FileStreamOptions { Mode = FileMode.Append, Access = FileAccess.Write, Share = FileShare.Read };
+                if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+                using (var output = new FileStream(path, options)) output.Write(line);
+                if (created) { Security.RestrictFile(path); auditFileBytes = 0; }
+                auditFileBytes += line.Length;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                ReportAuditFailure("append", ex);
+                try { auditFileBytes = File.Exists(path) ? new FileInfo(path).Length : 0; }
+                catch (Exception lengthError) when (lengthError is IOException or UnauthorizedAccessException) { auditFileBytes = 0; }
+            }
         }
     }
+
+    /// <summary>
+    /// Audits a remote, per-device event at most once per <see cref="AuditCoalesceWindow"/> for
+    /// each (kind, device). Repeats are counted and reported in the next entry, so a peer that
+    /// churns sessions or the clipboard cannot push other events out of the bounded history.
+    /// </summary>
+    internal bool AddCoalescedAudit(string kind, string deviceId, string detail)
+    {
+        lock (gate)
+        {
+            var now = clock.GetUtcNow();
+            var key = kind + "|" + deviceId;
+            if (coalesced.TryGetValue(key, out var known) && now - known.RecordedAt < AuditCoalesceWindow) { known.Suppressed++; return false; }
+            if (known is null && coalesced.Count >= MaximumCoalescedKeys)
+                foreach (var stale in coalesced.Where(entry => now - entry.Value.RecordedAt >= AuditCoalesceWindow).Select(entry => entry.Key).ToArray())
+                    coalesced.Remove(stale);
+            var repeats = known?.Suppressed ?? 0;
+            coalesced[key] = new CoalescedEvent { RecordedAt = now };
+            AddAudit(kind, deviceId, repeats > 0 ? $"{detail} {repeats} similar earlier events from this device were not recorded individually." : detail);
+            return true;
+        }
+    }
+
+    private void ReportAuditFailure(string step, Exception ex)
+    {
+        var now = clock.GetUtcNow();
+        if (now < nextAuditFailureReport) return;
+        nextAuditFailureReport = now + AuditCoalesceWindow;
+        try { AuditWriteFailed?.Invoke($"Audit log {step} failed ({ex.GetType().Name}); events stay in memory and later writes retry."); }
+        catch (Exception reportError) when (reportError is IOException or InvalidOperationException) { /* Reporting must not fail the operation. */ }
+    }
+
+    private sealed class CoalescedEvent { internal DateTimeOffset RecordedAt; internal int Suppressed; }
     public int InvalidatePairingsForIdentityRotation()
     {
         lock (gate)
@@ -291,8 +384,11 @@ public sealed class HostState
         var now = clock.GetUtcNow();
         foreach (var session in sessions.Values.Where(s => s.ExpiresAt <= now || now - s.LastActivityAt > TimeSpan.FromSeconds(30)).ToArray()) sessions.Remove(session.Id);
     }
+    /// <summary>Test seam: runs before every state save; throwing simulates a failed write.</summary>
+    internal Action? BeforeSave { get; set; }
     private void Save()
     {
+        BeforeSave?.Invoke();
         var path = Path.Combine(directory, "host.json"); var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {

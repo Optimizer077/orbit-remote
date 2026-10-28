@@ -7,6 +7,10 @@ import './details.css';
 /** Shown for every value that has not been measured or reported. Never replaced by a guess. */
 export const NOT_MEASURED = 'Not measured yet';
 export const THROUGHPUT_CAVEAT = 'Image bytes divided by the whole request time, including latency. Not a measure of link bandwidth.';
+export const PIPELINE_CAVEAT = 'From arrival in this window to drawn, over the last two seconds; the hand-off to the decoder thread is not timed. Host capture, encoding and network time are not included.';
+export const ROUND_TRIP_CAVEAT = "Round trip of this app's stream control requests, including host handling and connection setup. Not one-way delay.";
+export const DECODER_NOTE = 'Hardware is shown only after a decoder that Chromium allows to use hardware only has produced a frame.';
+const DECODER_LABELS = { hardware: 'Hardware', software: 'Software', unknown: 'Not confirmed' } as const;
 
 export type ConnectionDetailsProps = {
   open: boolean;
@@ -37,6 +41,8 @@ const row = (key: string, label: string, value: string | undefined, note?: strin
   ({ key, label, value: value ?? NOT_MEASURED, measured: value !== undefined, note });
 
 const fmtMs = (v?: number) => v === undefined || !Number.isFinite(v) ? undefined : v < 10 ? `${v.toFixed(1)} ms` : `${Math.round(v)} ms`;
+const fmtNum = (v: number) => v < 10 ? v.toFixed(1) : String(Math.round(v));
+const fmtPair = (a?: number, b?: number) => a === undefined || b === undefined || !Number.isFinite(a) || !Number.isFinite(b) ? undefined : `${fmtNum(a)} / ${fmtNum(b)} ms`;
 const fmtRate = (v?: number) => v === undefined || !Number.isFinite(v) ? undefined : `${v.toFixed(1)} updates/s`;
 const fmtKbps = (v?: number) => v === undefined || !Number.isFinite(v) ? undefined : v >= 1000 ? `${(v / 1000).toFixed(1)} Mbit/s` : `${Math.round(v)} kbit/s`;
 export function fmtBytes(bytes?: number) {
@@ -81,15 +87,23 @@ export function connectionSections(p: Omit<ConnectionDetailsProps, 'open' | 'onC
     ] },
   ];
   if (video) {
-    const fps = stats.fps === undefined ? undefined : `${stats.fps.toFixed(1)} fps`;
+    const fps = stats.fps === undefined ? undefined : `${stats.fps.toFixed(1)} fps`, rtt = stats.latency?.roundTrip;
+    const mode = stats.decodeMode === 'hardware' || stats.decodeMode === 'software' ? stats.decodeMode : 'unknown';
     sections.push({ key: 'video', title: 'Video stream', note: 'Only changed frames are sent, so a still screen draws few frames. Timings are measured on this computer.', rows: [
       row('quality', 'Smoothness', quality.value, quality.detail),
+      // "Not confirmed" is a reported state, not a measurement, so it is never marked as measured.
+      { key: 'decoder', label: 'Decoder', value: DECODER_LABELS[mode], measured: mode !== 'unknown', note: DECODER_NOTE },
       row('fps', 'Frames drawn', fps, 'Actual canvas draws over the last two seconds.'),
-      row('late', 'Late frames', stats.lateFrames === undefined ? undefined : String(stats.lateFrames), 'Captured on time by the host but delivered more than 50 ms late.'),
+      row('superseded', 'Replaced before display', stats.superseded === undefined ? undefined : String(stats.superseded),
+        'Decoded, then replaced by a newer frame before it could be shown, so only the newest was drawn. Not a drop.'),
+      row('dropped', 'Dropped frames', stats.dropped === undefined ? undefined : String(stats.dropped), 'Discarded by the decoder and never shown, last two seconds.'),
+      row('late', 'Late frames', stats.lateFrames === undefined ? undefined : String(stats.lateFrames), 'Captured on time by the other computer but delivered more than 50 ms late.'),
       row('gap', 'Longest gap', fmtMs(stats.longestGapMs)),
       row('decode', 'Average decode', fmtMs(stats.decodeMs)),
       row('draw', 'Average draw', fmtMs(stats.drawMs)),
       row('bitrate', 'Video data', fmtKbps(stats.kbps), 'Validated video payload; transport overhead is excluded.'),
+      row('pipeline', 'Viewer pipeline, typical / slow (p50 / p95)', fmtPair(stats.latency?.viewer?.p50, stats.latency?.viewer?.p95), PIPELINE_CAVEAT),
+      row('round-trip', 'Control round trip', rtt && `${fmtMs(rtt.p50)} median · ${fmtMs(rtt.min)} best`, ROUND_TRIP_CAVEAT),
     ] });
   }
   const lastImage = stats.samples > 0 && stats.unchanged ? 'Unchanged · 0 B' : fmtBytes(p.lastFrameBytes ?? stats.lastBytes);
@@ -121,7 +135,8 @@ export function connectionSummary(p: Omit<ConnectionDetailsProps, 'open' | 'onCl
   const lines = [`Orbit connection details: ${p.deviceName}`];
   for (const section of connectionSections(p)) {
     lines.push('', `${section.title}`);
-    for (const r of section.rows) lines.push(`  ${r.label}: ${r.value}${r.key === 'throughput' && r.measured ? ' (image bytes / request time; not link bandwidth)' : r.key === 'quality' && r.note ? ` (${r.note})` : ''}`);
+    for (const r of section.rows) lines.push(`  ${r.label}: ${r.value}${r.key === 'throughput' && r.measured ? ' (image bytes / request time; not link bandwidth)' : r.key === 'pipeline' && r.measured ? ' (this computer only; excludes host capture, encoding and network)'
+      : r.key === 'round-trip' && r.measured ? ' (stream control requests, including host handling and connection setup; not one-way delay)' : r.key === 'quality' && r.note ? ` (${r.note})` : ''}`);
   }
   return lines.join('\n');
 }

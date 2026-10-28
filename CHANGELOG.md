@@ -2,6 +2,119 @@
 
 Changes are documented by preview release. Application/package version `0.1.0` identifies the current development line; `v0.1.0-preview.1` identifies its initial preview distribution. The [validation record](docs/VALIDATION.md) is the source for completed checks, and [TODO.md](TODO.md) tracks remaining work.
 
+## Unreleased
+
+Changes on the development line since 0.1.0-preview.6. None yet.
+
+## 0.1.0-preview.6 — 2026-10-28
+
+Windows x64 development preview. The application and package version stay `0.1.0`.
+
+### Security
+
+An internal security review of the host, the desktop app and the build found no Critical or High findings. Both Medium findings are fixed, and so are most Low ones. Every finding, its fix and the remaining limits are in [the October 2026 security review](docs/SECURITY-REVIEW.md). Releases up to and including preview.5 do not contain these fixes. preview.2 to preview.4 were built without the Electron fuses and are marked Outdated on GitHub.
+
+- **Paired-host data is checked (Medium, D-1):** names, addresses and other values a paired computer sends are checked for type, length and characters before Orbit stores or shows them. Saved connections are repaired on load. A rendering error shows a recovery screen instead of a blank window.
+- **Debug switches are refused (Medium on macOS, D-2):** the installed app exits with a message if it is started with a Chromium debugging or sandbox-weakening switch, such as `--remote-debugging-port`. It also ignores the test variables that move its profile or put its host into test mode, and gives its host no `ORBIT_*` variables. DevTools are off in release builds.
+- **Desktop:** the file-transfer folder can only be chosen in the system dialog. Remote file names with bidirectional or invisible characters, or Windows device names, are refused.
+- **Host:**
+  - Clipboard access has a per-device budget and is recorded in Activity.
+  - Work before authentication is bounded.
+  - Disk, audit and session use by a paired computer is bounded.
+  - Refused pairing attempts and unknown certificates are recorded.
+  - Native error text no longer reaches the other computer.
+  - A blocked computer can no longer read `/api/info`.
+- **Runtime:** release builds now require .NET SDK 10.0.403 and bundle the .NET 10.0.14 runtime, which includes the .NET security updates since 10.0.4.
+- **Build:** `build.ps1` refuses to package the unfused test build.
+
+### Easier pairing
+
+- **Choose a direction on first run:** instead of one "Create your first invite" button on both computers, Orbit offers **Let another computer see this one** and **See another computer from here**, and each step says which computer does what. Elsewhere the host side reads **Invite a computer** and the viewer side **Join with an invite**.
+- **See only or See and control:** the invite dialog opens with this one choice, and **See only** is selected by default. Clipboard, files, and power stay separate opt-in switches. **Lock & restart** is off and disabled while See only is selected, because power needs control. A disabled **Take control** button now says why and suggests asking for a new invite with See and control.
+- **Invite countdown:** the invite shows **Expires in m:ss**, offers **Create a new invite** once it has expired (the expired invite can no longer be copied), and says "*device* joined" when the other computer pairs.
+- **Security code right after joining:** a successful join keeps the dialog open, shows the host's security code and where to compare it on the host, lists what was granted (for example "See only, plus clipboard"), and offers **Connect now** or **Later**. Pairing alone still never connects. The new device is checked at once, so it shows its platform and online state instead of "Not checked".
+- **Get started first:** on first run, Overview opens with a **Get started** card that offers both pairing directions before the status tiles. Step 1 shows this computer's real Tailscale state (on, off, not installed, or couldn't check) and the matching fix. The Devices page's empty state offers both directions too.
+- **Pairing steps:** both pairing dialogs show a three-step indicator. When the other computer joins, the invite dialog shows this computer's security code, so both sides can compare at the same moment.
+- **Errors in plain language, with one next action:** timeouts, unreachable devices, expired or used invites, clocks that disagree, revoked access, unavailable remote listening, incomplete invites, and changed identities each get a plain title and a single next step. The original error text stays under **Details**. This applies to pairing and to the connect error banner.
+
+### Clearer status
+
+- **Re-check Tailscale without restarting Orbit:** if Tailscale was off when Orbit started, **Tailscale is on now — check again** (in the Overview network tile and the pairing dialogs) restarts the background host so it can listen. It does so at most once every 10 s, and never while another device has a session open.
+- **Typed Tailscale status:** the host now reports its Tailscale state (connected, off, not found, or unknown), and the top bar shows **Tailscale off**, **Tailscale not found**, or **Tailscale status unknown** from that state instead of matching error text. Malformed Tailscale output reads as unknown.
+- **Check availability contacts your devices:** the Devices page button used to reload only local state. It now runs the same network check as the top bar, reads **Checking…** while it runs, and ignores a second click.
+- **Mac permission banner:** when a Mac host lacks Screen Recording or Accessibility permission, Overview names the missing permission, says to quit and reopen Orbit after allowing it, and opens the existing permission setup. The button grants nothing by itself; each macOS request still needs its own approval.
+- **Plainer wording:** the Protection tile reads **Private, encrypted connection**, with the WireGuard and mutual TLS details under a disclosure. Devices read **Can see this computer** or **You can see it**, a device you blocked reads **Access paused by you**, and Settings talks about invites and this computer instead of host policy.
+- **Plain words everywhere:** the rest of the app now says "this computer" or "the other computer" instead of host or device. Permissions read **Allowed** or **Not allowed** instead of granted, **Revoke** is now **Remove access…** with a confirmation that says what happens, and a removed computer reads **Access removed**. A computer's **⋯** menu opens a details dialog listing what it can do, with its address, pairing date and ID under **Connection details**. Activity events have plain names, such as **Connection started** and **Computer paired**, and Connections lists the computers that can see this one again.
+
+### Viewer
+
+- **Consistent colour, contrast, and shape:** buttons, button groups, and panels each have one corner shape, while status pills stay round. The selected toolbar mode is marked with the accent colour, and the keyboard-focus frame around the remote picture stays visible on top of it, including while scrolled at **1:1**. Text and control contrast is checked over black, white, and checkerboard remote pictures in every theme, and recovery screens fit a 720×480 pop-out window and a 360 px-wide window.
+- **Ember theme:** a warm dark theme. Settings and the command palette now offer five appearance choices, and Ember's faint text meets the checked contrast pairs.
+- **Software decode fallback:** if the hardware decoder refuses the stream or fails before its first frame, the viewer retries once with software decoding before falling back to images.
+- **Input batching:** the viewer keeps one input request in flight and sends everything queued meanwhile as one batch of up to 64 events, merging consecutive mouse moves. The host applies a batch in order with the same per-event permission checks and releases held keys and buttons if a batch fails. Older hosts still receive one event per request.
+- **Timing in Connection details:** new rows show the viewer's own pipeline time, from arrival to drawn (typical and slow, p50 / p95), and the control round trip. They exclude host capture, encoding, and network time, so they are not click-to-screen latency.
+- **Keyframe check:** the viewer checks each video frame's keyframe flag against its H.264 content instead of trusting the host, and treats a mismatch as a stream error.
+- **Image mode fix:** in image mode the session re-rendered on every received frame, a regression in preview.5. It now re-renders only when the display state changes.
+- **Named toolbar buttons:** at widths up to 1000 px, where button text is hidden, every toolbar button keeps a short accessible name.
+- **Newest frame first:** the viewer keeps up to three video messages in flight to its decoder instead of one. It still decodes every frame, but draws at most one frame per display refresh, always the newest. A frame replaced before the next refresh is counted as replaced, not dropped. In a generated-video bench, the p95 time from a parsed frame to the canvas draw at a paced 60 fps was 1.3 ms, against 1.2–1.6 ms for the previous code, and bursts stayed within 1 ms of the previous code. This bench is not click-to-screen latency.
+- **Toolbar:**
+  - While you control the other computer and the toolbar hides, a small **Controlling** pill with the release shortcut (Ctrl+Alt+Enter) stays on screen. Clicks pass through it.
+  - Close screen and Disconnect sit at the end of the toolbar.
+  - Fullscreen, Expand and Fit have distinct icons, and Fit and 1:1 show which one is active.
+  - At 1280 px the full-window toolbar fits on one row.
+- **Decoder in Connection details:** the video section shows **Decoder** (Hardware, Software, or Not confirmed), **Replaced before display**, and **Dropped frames**. Hardware is shown only after that decoder has produced a frame.
+
+### Look and feel
+
+- **Bolder Daylight and Graphite:** Daylight has a deep-navy sidebar, a vivid teal accent, and solid teal primary buttons. Graphite moves from grey to navy-charcoal. Both themes use solid fills, component borders at 3:1 contrast, and an opaque viewer toolbar. Midnight, Paper, and Ember are unchanged.
+- **Contrast check in `npm test`:** every text pair must reach 4.5:1 and every component and focus colour 3:1. The status colours must also stay distinguishable under simulated protanopia and deuteranopia.
+- **Recoloured logo and icons:** the orbital mark, the app and tray icons, and the README banner move from mint to the teal and navy of these themes. Their shapes are unchanged.
+- **Appearance cards line up:** the five theme cards have one size. They wrap as 5, 3 + 2, or 2 + 2 + 1, depending on the width of the Appearance card.
+- **Settings explain themselves:** **File transfer**, **Lock & restart**, and **Start Orbit at sign-in** each say what On and Off do. Unsaved edits show a save bar with **Discard changes** and **Save changes**, and nothing is sent before Save. Once saved, the bar shows the values the computer actually stored. Network and certificate details sit under disclosures, and text links underline on hover.
+- **Safer removal:** **Remove access** and **Forget** send one request even after a double click, and Forget says that an open connection to that computer ends.
+
+### Keyboard and screen readers
+
+- **Focus stays where you are working:**
+  - Shift+Tab inside a dialog stays in the dialog.
+  - **Join with an invite** puts focus in the invite field, and Escape returns to the button that opened the dialog.
+  - Focus lands on a live control or heading after Create invite, pairing, saving or discarding Settings, replacing the identity, Remove access, Forget, Connect, and Disconnect.
+- **Announcements:**
+  - Messages such as "Settings saved." come from a status region that stays mounted, so screen readers announce them. Errors stay alerts.
+  - **Copy security code** in Settings confirms with "Security code copied.".
+  - The viewer announces "Back to live video." once when it recovers on its own.
+
+### Performance
+
+- **Quieter background refresh:** a status refresh that brings no change no longer re-renders the window. Before, each refresh re-rendered every component, including all 500 Activity rows.
+- **No polling while minimized:** minimized or hidden in the tray, the window stops refreshing in the background. When it is shown again, it refreshes at once.
+- **Faster Activity page:** dates are formatted with two shared formatters instead of building 1000 per render.
+
+### Reliability
+
+- **GPU encoder binding race:** while the video encoder opened, a capture recovery at the same moment could release the GPU device under it, which could crash the stream-reopen path. The encoder now holds its own references during the open. A failed open is cleaned up at once.
+
+### Windows on ARM
+
+- `Start-Orbit.cmd` starts the native ARM64 package on ARM64 Windows.
+
+### Development
+
+- **Headless host tests:** `ORBIT_TEST_SKIP_NATIVE_DESKTOP=1` skips only the live desktop-capture checks and the four direct native-input probes, and prints each skipped check. Unset, every check runs as before.
+- Colour-conversion (NV12) checks with odd and tiny sizes and unaligned data now run in the host suite on every OS.
+- **Regenerated screenshots:** README screenshots now come from a generated demo with fictional names, example addresses, and a generated picture, plus a new gallery of the first-run chooser, the invite countdown, the viewer, and the display-asleep notice. The pairing diagram uses the app's current labels.
+- **README matches the app:** pairing steps, settings and page names use the app's current labels. The session figure now shows releasing control with **Control enabled** instead of Esc (Esc goes to the remote computer while controlling), and the permissions figure shows the real 32 MiB transfer limit instead of 16 MiB.
+
+- **README and results:** a rewritten introduction. [RESULTS.md](docs/RESULTS.md) and [PERFORMANCE.md](docs/PERFORMANCE.md) add the 27–28 October results: the viewer presentation bench, a stability sweep, a crash investigation, and the theme contrast check.
+
+### Experimental and off
+
+- **Short pairing code:** the host contains an experimental short pairing code (SRP-6a). It is off and cannot be enabled in the packaged app, which starts its host without any `ORBIT_*` variable. Pairing still uses the invitation. The host now includes Bouncy Castle C# 2.7.0 (MIT) for it, and its licence notice ships as `THIRD_PARTY_NOTICES.md`.
+
+### Not in this release
+
+- The bitrate safety net for very noisy content, and later work on the streaming engine and diagnostics, are still in development.
+
 ## 0.1.0-preview.5 — 2026-10-27
 
 ### Hardware video, on by default

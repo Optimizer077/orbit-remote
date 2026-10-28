@@ -45,8 +45,8 @@ locked-screen access or physical latency.
 | --- | --- |
 | `ORBIT_CONTROL_TOKEN` | Required random local control bearer token, at least 32 characters; desktop main process keeps it out of the renderer. |
 | `ORBIT_DATA_DIR` | Persistent host state directory. Default: the current user's local application data, `OrbitRemote/host`. |
-| `ORBIT_CONTROL_PORT` | Local control port; default `47831`. |
-| `ORBIT_REMOTE_PORT` | Remote HTTPS port; default `47832`. Ports must differ and be 1024â€“65535. |
+| `ORBIT_CONTROL_PORT` | Local control port; default `47831`. An installed desktop release ignores this variable and always uses the default; development runs and the unfused test build honour it. |
+| `ORBIT_REMOTE_PORT` | Remote HTTPS port; default `47832`. Ports must differ and be 1024 to 65535. An installed desktop release does not pass this variable to its host, so the host uses the default; development runs and the unfused test build honour it. |
 | `ORBIT_PARENT_WATCH` | When `1`, stdin is a private ownership pipe from the desktop main process. EOF or pipe failure requests graceful host shutdown. Standalone CLI leaves this unset. |
 | `--loopback-test` | Explicit integration-test mode: remote HTTPS binds `127.0.0.1`; source identity verification accepts loopback. Never a wildcard listener. |
 
@@ -54,7 +54,13 @@ The local listener binds only `127.0.0.1`; requests require `Authorization: Bear
 
 The desktop launches its host child with piped stdin and `ORBIT_PARENT_WATCH=1`, retaining the pipe for the host's lifetime. If the desktop exits or crashes, EOF stops the host through the normal application lifetime path, which ends sessions and attempts to release held keys/buttons. Stdin data has no command semantics. The integration harness explicitly closes its ownership pipe and verifies a clean process exit. Standalone host execution does not enable this watchdog.
 
-At startup, production mode discovers a running Tailscale node through `tailscale status --json`, selects its CGNAT IPv4 address, and binds HTTPS only to that address. If verification fails, local administration remains available and no remote listener opens. Start/restart the host after fixing Tailscale; dynamic rebinding is not implemented. Incoming remote requests must originate from a Tailscale address and pass `tailscale whois --json <actual-source-address>`; successful source checks cache for ten seconds. The source is read from the socket, never an HTTP header. Tailscale CLI is invoked with fixed argument lists, without a shell. See the [official Tailscale CLI reference](https://tailscale.com/docs/reference/tailscale-cli).
+At startup, production mode discovers a running Tailscale node through `tailscale status --json`, selects its CGNAT IPv4 address, and binds HTTPS only to that address. If verification fails, local administration remains available and no remote listener opens. Start/restart the host after fixing Tailscale; dynamic rebinding is not implemented. Incoming remote requests must originate from a Tailscale address and pass `tailscale whois --json <actual-source-address>`; successful source checks cache for ten seconds and failed ones for three seconds. Concurrent requests from one address share a single `whois` lookup. The source is read from the socket, never an HTTP header. Tailscale CLI is invoked with fixed argument lists, without a shell. See the [official Tailscale CLI reference](https://tailscale.com/docs/reference/tailscale-cli).
+
+Remote listener limits, enforced before any request is authenticated:
+
+- **HTTP/1.1 only.** The remote listener does not offer HTTP/2 through ALPN. Every Orbit client (the Electron viewer's Node `https` agent, and .NET `HttpClient`) uses HTTP/1.1, and no route depends on HTTP/2, so one connection carries one request at a time.
+- **Connections.** At most 128 open remote connections, and at most 32 from one source address. A connection over either limit is closed before the TLS handshake. One viewer needs at most 13 (8 pooled connections, one per video stream, at most 4, and a retry). Refusals are logged locally as a warning with the latest source and the count, at most once every 30 seconds. Four hostile source addresses at the per-source limit can hold all 128 pre-TLS slots until their connections time out, blocking new remote connections meanwhile. These limits apply only to the remote listener: there is no server-wide limit, and the loopback control listener has no connection cap, so a local process cannot lock the desktop out of its own host.
+- **Request rate.** The per-address limits (120 requests/s with a burst of 160 overall, and 6 pairing requests per minute) run before the client-certificate, pin and `whois` checks, so unauthenticated and rejected requests count against them and receive `429` once exhausted.
 
 ## TLS and device pairing
 
@@ -70,7 +76,135 @@ The main process retrieves `{certificatePem,privateKeyPem,fingerprint}` through 
 4. It performs remote `POST /api/pair` with its actual TLS client certificate and `{secret,deviceName}`.
 5. Success returns `{deviceId,deviceName,hostId,hostName,permissions,certificateFingerprint}`. The receiver persists the certificate pin and approved grants. The invite is consumed atomically and cannot be replayed; unconsumed invites expire after five minutes and disappear at host restart. Only a secret hash is held in host memory. Pairing is limited to six attempts per source per minute.
 
-Invites are bearer credentials until consumed or expired; share them privately. The host never places invite secrets in audit records or persisted state. Local device revocation removes its sessions and is checked again on requests over existing TLS connections.
+Invites are bearer credentials until consumed or expired; share them privately. The host never places invite secrets in audit records or persisted state. A refused `POST /api/pair` (unknown, expired or used invite, or a malformed request) is audited as `pair.rejected`, and a remote request whose certificate is not paired or was revoked as `auth.unknown_certificate`. A source that `tailscale whois` does not verify (`403`) is audited as `auth.source_rejected`, and a connection that presents no usable client certificate, fails the TLS link policy or ends before completing TLS as `auth.certificate_refused`. Every such entry holds only the socket source address and a fixed reason. Each kind is recorded at most once per source per minute, with a count of the repeats it absorbed, and at most 20 such entries per minute host-wide, so probes cannot flush the 500-entry history. Local device revocation removes its sessions and is checked again on requests over existing TLS connections.
+
+## Short pairing code (EXPERIMENTAL, disabled by default)
+
+**Status:** experimental host implementation of F33. It is inert unless the host process starts with `ORBIT_EXPERIMENTAL_SHORT_CODE=1`. With the flag unset, none of the routes in this section are mapped, no route accepts an unknown certificate except `/api/pair`, and `/api/status` has no `experimentalShortCode` field. The long invite above is unchanged in both cases.
+
+**Enabling by default is blocked.** The pinned dependency, Bouncy Castle C# `BouncyCastle.Cryptography` 2.7.0, predates the upstream SRP exponent-blinding change (bc-csharp commit `08f34d11`). The profile also still needs an independent review of its composition before it can be enabled. An automated test cannot show the absence of offline guessing; that property comes from the reviewed protocol and its correct composition.
+
+### Code and limits
+
+- **Format:** five CSPRNG bytes (40 bits) are read as a big-endian bit string and split into eight 5-bit groups. Each group indexes the Crockford alphabet `0123456789ABCDEFGHJKMNPQRSTVWXYZ`, so there is no modulo bias. The code is displayed as `XXXX-XXXX`.
+- **Normalisation (the only rule):** ASCII only. Spaces and hyphens are ignored anywhere, `a`–`z` are uppercased, `O` becomes `0`, and `I`/`L` become `1`. Exactly eight alphabet symbols must remain; anything else, including `U`, is invalid.
+- **One active code per host.** It is separate from the 20 long invites. Creating a code replaces the previous one and invalidates its attempts.
+- **Lifetime and use:** single use. The code expires 10 minutes after creation, in whole seconds.
+- **Attempt budget:** five attempts per code, shared across all peers and concurrent requests. Every `start` reserves one attempt before any PAKE work. That attempt is spent when it fails or passes its 60-second deadline unfinished. The fifth failure cancels the code, and no sixth attempt can start while five are reserved.
+- **Rate limit:** each source address may send 15 bootstrap requests per minute.
+- **Known denial of service:** any Tailscale peer that can reach the host can spend a code's five attempts with five `start` requests, with no knowledge of the code. The code is then locked. Recovery is for the owner to create a new code; a later UI will surface the lock. The limit is deliberately not weakened, because each attempt is one online guess.
+- **Names:** device names (here and on the long invite path) and the host name in settings refuse text that could disguise a name. That covers control characters, every Unicode format character (category Cf) except the joiners ZWNJ and ZWJ (U+200C/U+200D, needed by Persian and Indic words and emoji sequences) and the direction marks LRM and RLM (U+200E/U+200F), the line and paragraph separators U+2028/U+2029, and invalid UTF-16. Category Cf includes the bidi embedding, override and isolate characters U+202A–U+202E and U+2066–U+2069, zero-width space, U+2060, U+FEFF, U+061C and the soft hyphen. The viewer applies the same rule to the receipt's `hostId`, `hostName`, `deviceId` and `deviceName`. A host whose saved name breaks the rule refuses to create a short code, because the viewer would reject the receipt after the code was consumed.
+- **Ephemeral state:** the code itself is never stored. Until success, cancel, expiry, lockout or exit, the host keeps only the salt and SRP verifier, in memory.
+- **No secret logging or persistence:** codes, verifiers, SRP values, session keys and transcripts are never logged or persisted. Audit records events only: `shortcode.created`, `shortcode.cancelled`, `shortcode.attempt_failed`, `shortcode.locked` and `device.paired`.
+
+### Local routes (bearer token; flag on only)
+
+| Method and path | Request / response |
+| --- | --- |
+| `POST /api/short-code` | `{deviceName?,permissions}` → `{code:"XXXX-XXXX",expiresAt,permissions}`. Permission rules are the same as for invites. Refuses while the remote listener is unavailable. The code is returned only here. |
+| `GET /api/short-code` | `{state,expiresAt,permissions,attemptsRemaining}`. `state` is `active`, `none`, `used`, `expired`, `cancelled` or `locked`. Never contains the code. |
+| `DELETE /api/short-code` | Cancel the active code and its attempts. `204`, or `404` when no code is active. |
+| `POST /api/short-code/pair` | Client role, used by the viewer's Electron main toward its own host. Request: `{address,code,deviceName?}`. Response: `{hostId,hostName,deviceId,deviceName,permissions,certificateFingerprint,address}`. See the client-role details below. |
+
+**Client-role details.**
+
+- `address` must be `https://<IP>:<port>`, with a Tailscale IP. Loopback is allowed only in `--loopback-test` mode. Proxies and redirects are never used.
+- The local host runs the SRP client role with its own identity certificate as the TLS client certificate. One attempt uses exactly one TLS connection for `start`, `verify` and `confirm`. The client never reconnects or retries inside an unfinished attempt; a closed connection ends the attempt, which spends one of the five attempts, and a new attempt is needed.
+- `certificateFingerprint` is the server certificate observed on that TLS connection. It is returned only after both confirmations verify; the Electron main then persists it as the host pin.
+- Only one client-role pairing runs at a time.
+
+**Client-role errors** are `{error,code}`:
+
+| HTTP status | `code` values |
+| --- | --- |
+| `400` | `invalid_address`, `invalid_code`, `invalid_request` |
+| `403` | `short_code_rejected`, `short_code_unavailable`, `short_code_locked`, `host_identity_mismatch` |
+| `409` | `busy`, `identity_unavailable` |
+| `429` | `rate_limited` |
+| `502` | `protocol_error`, `unsupported_suite`, `short_code_unsupported`, `unreachable` |
+
+### Remote bootstrap routes (flag on only)
+
+These three exact, case-sensitive paths are the only routes an unknown client certificate may reach besides `/api/pair`. Other spellings keep ordinary pinning. The constraints:
+
+- The TLS link policy and the Tailscale source check still run first.
+- Bodies are limited to 4 KiB.
+- JSON must contain exactly the listed fields. Missing, duplicate or unknown fields return `400 {code:"invalid_request"}`.
+- Byte fields are unpadded base64url with an exact decoded length, shown in parentheses below.
+
+| Step | Request → response |
+| --- | --- |
+| `POST /api/short-pair/start` | `{v:1,suite,viewerNonce(32),deviceName}` → `{v,suite,attemptId(16),instanceId(16),hostNonce(32),expiresAt,grants:{view,control,clipboard,files,power},salt(32),b(384)}`. `expiresAt` is integer Unix seconds. Any other `v` or `suite` returns `400 {code:"unsupported_suite"}`, never a downgrade. |
+| `POST /api/short-pair/verify` | `{attemptId,a(384),m1(32)}` → `{m2(32),hostConfirmation(32)}`. |
+| `POST /api/short-pair/confirm` | `{attemptId,viewerConfirmation(32)}` → `{deviceId,deviceName,hostId,hostName,permissions,certificateFingerprint}`. |
+
+Refusals are `403 {code}`, with `code` set to `short_code_unavailable`, `short_code_locked` or `short_code_rejected`.
+
+**One TLS connection per unfinished attempt.** The host binds each attempt to the client certificate and to the TLS connection (Kestrel connection ID) that sent `start`. A `verify` or `confirm` for the attempt's next step that arrives from another connection, even with the same certificate, fails the attempt and spends its budget slot. A message out of order, such as `confirm` before `verify` or a second `verify`, is refused without failing the attempt. The only cross-connection message is the receipt re-fetch for a completed attempt, described under completion.
+
+### SRP profile
+
+The profile is SRP-6a with the RFC 5054 3072-bit group (`g = 5`) and SHA-256. Both roles use the Bouncy Castle C# `Srp6Client`, `Srp6Server` and `Srp6VerifierGenerator` classes.
+
+| Item | Definition |
+| --- | --- |
+| Identity `I` | ASCII `orbit-short-pair-v1` |
+| Password `P` | ASCII of the normalised eight-symbol code |
+| Salt `s` | 32 random bytes per code |
+| Derived values | `x = H(s‖H(I‖":"‖P))`, `v = g^x`, `k = H(PAD(N)‖PAD(g))`, `u = H(PAD(A)‖PAD(B))` |
+| Evidence and key | `M1 = H(PAD(A)‖PAD(B)‖PAD(S))`, `M2 = H(PAD(A)‖PAD(M1)‖PAD(S))`, `K = H(PAD(S))` |
+| Padding | `PAD` is 384-byte big-endian |
+| Wire encoding | `A` and `B` are 384-byte big-endian. `M1`, `M2` and `K` are 32-byte big-endian. |
+
+The host verifies `M1` before it returns `M2`. Public values must be canonical: both sides require `0 < A < N` and `0 < B < N` on the 384-byte value, and reject anything else before SRP arithmetic. On the host, that rejection fails the attempt.
+
+### Transcript `T` (exact bytes)
+
+`T` concatenates fourteen fields in this fixed order. Every field is mandatory and is encoded as `tag (1 byte) ‖ role (1 byte) ‖ length (uint16 big-endian) ‖ value`. Roles are `0x00` shared, `0x01` host (SRP server) and `0x02` viewer (SRP client).
+
+| # | Tag | Role | Value (length in bytes) |
+| --- | --- | --- | --- |
+| 1 | `0x01` | `0x00` | ASCII `orbit-short-pair` (16) |
+| 2 | `0x02` | `0x00` | version, uint16 big-endian `1` (2) |
+| 3 | `0x03` | `0x00` | ASCII `SRP6a-RFC5054-3072-SHA256/HMAC-SHA256` (37) |
+| 4 | `0x04` | `0x01` | invitation instance id (16) |
+| 5 | `0x05` | `0x01` | attempt id, the raw bytes of `attemptId` (16) |
+| 6 | `0x06` | `0x02` | viewer nonce (32) |
+| 7 | `0x06` | `0x01` | host nonce (32) |
+| 8 | `0x07` | `0x01` | code expiry, int64 big-endian Unix seconds (8) |
+| 9 | `0x08` | `0x01` | requested grants bitmask: view `0x01`, control `0x02`, clipboard `0x04`, files `0x08`, power `0x10` (1) |
+| 10 | `0x09` | `0x01` | SRP salt `s` (32) |
+| 11 | `0x0A` | `0x02` | SRP public value `A`, 384-byte big-endian (384) |
+| 12 | `0x0A` | `0x01` | SRP public value `B`, 384-byte big-endian (384) |
+| 13 | `0x0B` | `0x01` | host certificate fingerprint: SHA-256 of the DER certificate (32) |
+| 14 | `0x0B` | `0x02` | viewer certificate fingerprint: SHA-256 of the DER certificate (32) |
+
+`T` is 1080 bytes. `A`, `B`, the salt and the attempt id are already bound through SRP (`u`, `M1`, `K`) or the request flow; including them is defence in depth. Both fingerprints come from the actual TLS connection, never from JSON:
+
+| Side | Host fingerprint | Viewer fingerprint |
+| --- | --- | --- |
+| Host | its own server certificate | the client certificate presented on that connection |
+| Viewer's local host | the server certificate observed on its outgoing connection | its own identity certificate |
+
+### Confirmations and completion
+
+```
+hostConfirmation   = HMAC-SHA256(HMAC-SHA256(K, "orbit-short-pair v1 confirmation host-to-viewer"), T)
+viewerConfirmation = HMAC-SHA256(HMAC-SHA256(K, "orbit-short-pair v1 confirmation viewer-to-host"), T)
+```
+
+The two directions use distinct keys, so a reflected confirmation fails. Both sides compare in constant time. A man in the middle that terminates TLS with a different certificate on either side changes `T`. Its confirmation then fails, and nothing is pinned.
+
+Completion runs in this order:
+
+1. The viewer verifies `M2` and `hostConfirmation` before it sends `viewerConfirmation`.
+2. The host verifies `viewerConfirmation`.
+3. In one critical section, the host consumes the code and then pins the viewer certificate with the code's grants, in the same order as `/api/pair`. If saving the pairing fails, the code stays consumed and nothing is pinned: the host also restores its in-memory device list, so the certificate is not trusted before a restart either. The long invite path does the same.
+4. The viewer persists the host pin only after it receives the receipt.
+
+**Receipt re-fetch.** After success, the host keeps one completion receipt for two minutes. A `confirm` for that completed `attemptId` with the same viewer certificate and the same `viewerConfirmation` returns the identical receipt without a second grant, on any connection. Any other repeat is refused, as is any re-fetch after the two minutes. The receipt cache is separate from the active code: creating a new code or cancelling one does not clear it, and only its two-minute expiry or a host restart does. Expiry, cancellation, lockout, a replacement code or a host restart invalidates every unfinished attempt. The current client does not use the re-fetch path.
+
+**Cross-check vectors:** [ShortPairVectors.cs](../tests/Orbit.Host.Tests/ShortPairVectors.cs) gives fixed inputs and the expected verifier, `A`, `B`, SRP evidence, `K`, the full 1080 transcript bytes and both confirmation MACs, plus MACs for a changed viewer certificate and a changed `A`. The expected values were derived independently in Python.
 
 ## JSON shapes
 
@@ -86,39 +220,39 @@ These require the local bearer token and are unavailable on the remote listener.
 
 | Method and path | Request / response |
 | --- | --- |
-| `GET /api/status` | `{hostId,hostName,version,startedAt,remoteEnabled,remoteAddress,certificateFingerprint,transport,platform,settings,pairedDevices,sessions}`. `transport` includes `mode`, `address`, `error`, `peers`. |
+| `GET /api/status` | `{hostId,hostName,version,startedAt,remoteEnabled,remoteAddress,certificateFingerprint,transport,platform,settings,pairedDevices,sessions}`. `transport` includes `mode`, `address`, `error`, `peers`, `state`. `state` is the stable machine-readable discovery result: `"connected"`, `"off"` (CLI found but not running/signed in, or no tailnet IPv4), `"not-found"` (no CLI in the checked paths), `"unknown"` (the status call failed or returned malformed output) or `"loopback-test"`. `error` is human text only and must not be parsed; clients treat a missing `state` (older hosts) or an unrecognized value as not provided. |
 | `GET /api/peers` | Paired-device array: `{id,name,fingerprint,permissions,createdAt,revokedAt,blockedByOwner}`. The owner block is separate from certificate revocation. |
 | `GET /api/tailnet-peers` | Startup discovery snapshot of Tailscale peer inventory. |
-| `POST /api/invites` | `{deviceName?,permissions}` â†’ `{inviteUri,expiresAt,permissions}`. Refuses if remote listener is unavailable. |
+| `POST /api/invites` | `{deviceName?,permissions}` → `{inviteUri,expiresAt,permissions}`. Refuses if remote listener is unavailable. |
 | `DELETE /api/peers/{id}` | Revoke certificate pin, clear its owner block, end sessions and release held input. `204`. A later owner-approved re-pair is a new authorization decision. |
 | `POST /api/peers/{id}/block` | Block the known device until the owner allows it again, end all its sessions and release its held input. `204`, idempotent. Use the incoming row's device ID even when its session ID has expired. Unknown/revoked device: `404`. |
 | `POST /api/peers/{id}/allow` | Explicit owner action to clear an owner block, rotate resume authorization and retain existing grants. Returns the paired-device DTO. Already allowed: unchanged; unknown/revoked device: `404`. |
-| `GET /api/audit` | Up to 500 newest-first `{at,kind,deviceId,detail}` events. No clipboard contents, file contents, or invitation secrets. |
+| `GET /api/audit` | Up to 500 newest-first `{at,kind,deviceId,detail}` events. No clipboard contents, file contents, or invitation secrets. On disk, events are appended to `audit.jsonl`, which rotates to a single `audit.1.jsonl` at 256 KiB, so the log stays under about 512 KiB. If the file cannot be written or rotated (deleted, locked), the event stays in memory, the failure is logged locally at most once a minute, and the operation that produced it still succeeds. Remote-initiated `session.started`, `session.ended`, `clipboard.read` and `clipboard.write` events are written at most once per kind per device per minute; the next entry says how many were coalesced. Owner actions are never coalesced. |
 | `GET /api/settings` | Host settings. |
-| `PUT /api/settings` | Complete host settings object â†’ validated settings. |
+| `PUT /api/settings` | Complete host settings object → validated settings. |
 | `GET /api/identity/export` | Private client identity, main-process only. Alias: `/api/client-identity`. |
 | `DELETE /api/sessions/{id}` | Block the receiving session's device, end all sessions of that device and release its held input. `204`. A stale session ID returns `404`; use the device block route for a stale incoming row. |
 | `POST /api/disconnect-all` | End incoming sessions, rotate all non-revoked paired devices' resume epochs and persist an owner block for devices with live sessions at that instant; release input. `204`. Idle paired devices may explicitly Connect again, with their old automatic resume denied. Blocked devices require local Allow again. |
 
 ## Remote routes
 
-All require actual TLS client authentication and an unrevoked paired certificate except `/api/pair`, which requires the valid invite instead. Session ownership is checked against that certificate's paired device.
+All require actual TLS client authentication and an unrevoked paired certificate except `/api/pair`, which requires the valid invite instead. Only when the host runs with the experimental short-code flag are the three `/api/short-pair/*` bootstrap routes also exempt; see [Short pairing code](#short-pairing-code-experimental-disabled-by-default). Session ownership is checked against that certificate's paired device.
 
 | Method and path | Behavior / required grant |
 | --- | --- |
-| `POST /api/pair` | `{secret,deviceName}` â†’ pairing response above. |
+| `POST /api/pair` | `{secret,deviceName}` → pairing response above. |
 | `GET /api/info` | `{hostId,hostName,platform,permissions,settings:{allowRemotePower,fileTransferEnabled}}`. |
-| `POST /api/sessions` | `{monitorId:null,viewOnly:false,resumeEpoch:null}` â†’ `{id,deviceId,deviceName,monitorId,permissions,createdAt,expiresAt,lastActivityAt,lastInputAt,resumeEpoch}`. Explicit Connect omits `resumeEpoch`; automatic renewal supplies its previous value. Requires available screen capture and viewing grant. |
+| `POST /api/sessions` | `{monitorId:null,viewOnly:false,resumeEpoch:null}` → `{id,deviceId,deviceName,monitorId,permissions,createdAt,expiresAt,lastActivityAt,lastInputAt,resumeEpoch}`. Explicit Connect omits `resumeEpoch`; automatic renewal supplies its previous value. Requires available screen capture and viewing grant. Each paired device may create a burst of 4 sessions, refilled at 1 per second, counting explicit and automatic creation; beyond that `429 {code:"session_rate_limited",error}` with `Retry-After: 1`. |
 | `GET /api/sessions/{id}` | Session status and heartbeat. |
 | `DELETE /api/sessions/{id}` | End own session and release held input. |
 | `GET /api/sessions/{id}/frame?monitorId=<id>&scale=1&format=png&quality=75` | Requires viewing. PNG by default; optional JPEG permission selects the smaller PNG/JPEG body per frame on capable hosts. Optional monitor selection preserves the session default when absent. Conditional `If-None-Match` may return304 with no body. Format/geometry headers are described below. |
-| `POST /api/sessions/{id}/input` | Input object below; requires control. `204`. |
+| `POST /api/sessions/{id}/input` | Input object below, or an input batch `{events:[...]}` on hosts advertising `canInputBatch`; requires control. `204`. |
 | `POST /api/sessions/{id}/release-inputs` | Release held keys/buttons, requires control. Call on viewer blur, Escape, disconnect, and navigation. |
-| `GET /api/sessions/{id}/clipboard` | `{text}`; requires clipboard. Explicit requests only. |
-| `PUT /api/sessions/{id}/clipboard` | `{text}` up to 8192 characters, no null characters; requires clipboard. |
+| `GET /api/sessions/{id}/clipboard` | `{text}`; requires clipboard. Explicit requests only. Rate-limited per paired device (below). |
+| `PUT /api/sessions/{id}/clipboard` | `{text}` up to 8192 characters, no null characters; requires clipboard. Rate-limited per paired device (below). |
 | `GET /api/sessions/{id}/files` | Flat transfer-directory inventory, at most 500 entries. Requires files grant and locally enabled transfer folder. |
 | `GET /api/sessions/{id}/files/{name}` | Download a single plain filename, at most 32 MiB. Session authority and local transfer enablement are checked again before every 64 KiB chunk; a partial response is aborted when access ends. |
-| `PUT /api/sessions/{id}/files/{name}` | Raw file bytes, at most 32 MiB; creates a new file, never overwrites. Uploads recheck authority and transfer enablement as chunks arrive, then stage, mark and verify before atomic no-overwrite publication. |
+| `PUT /api/sessions/{id}/files/{name}` | Raw file bytes, at most 32 MiB; creates a new file, never overwrites. Uploads recheck authority and transfer enablement as chunks arrive, then stage, mark and verify before atomic no-overwrite publication. An upload starts only if the transfer folder's volume keeps at least 1 GiB free after every in-flight upload, counted at its 32 MiB limit; otherwise `409 {error}` before any file is created. |
 
 A removed session ID is not always renewable. Before looking up the ID, session
 routes re-read the current decision for the actual TLS certificate. An owner's
@@ -233,7 +367,7 @@ The pool is bounded to eight monitor entries and 64 megapixels of source surface
 
 Input objects:
 
-Frame monitor IDs come from `/api/info` â†’ `platform.monitors`. A supplied ID must be one printable string, 1â€“128 characters, naming an existing host monitor. The native backend rejects unknown IDs. Selecting a monitor for one frame does not mutate the session default, recreate the session, grant additional permissions, or acquire a second controller. Multiple viewer windows may request different existing monitors using the same authenticated session; all input continues through the same serialized control gate and uses the monitor's reported physical coordinates. This maps existing remote displays into separate local windows. Creating an additional virtual remote display requires a separate OS display capability/driver and is not implemented; no display driver or kernel extension is installed.
+Frame monitor IDs come from `/api/info` → `platform.monitors`. A supplied ID must be one printable string, 1–128 characters, naming an existing host monitor. The native backend rejects unknown IDs. Selecting a monitor for one frame does not mutate the session default, recreate the session, grant additional permissions, or acquire a second controller. Multiple viewer windows may request different existing monitors using the same authenticated session; all input continues through the same serialized control gate and uses the monitor's reported physical coordinates. This maps existing remote displays into separate local windows. Creating an additional virtual remote display requires a separate OS display capability/driver and is not implemented; no display driver or kernel extension is installed.
 
 ```json
 {"kind":"pointerMove","x":100,"y":100}
@@ -244,7 +378,9 @@ Frame monitor IDs come from `/api/info` â†’ `platform.monitors`. A supplied
 
 Buttons are `left`, `middle`, `right`; keys are a native backend allowlist of DOM `KeyboardEvent.code` values. Coordinates must lie on a reported monitor. Wheel magnitude is bounded. These are structured events, never commands. Keyboard layout/text/IME parity is not complete.
 
-Sessions have a two-hour absolute lifetime, 30-second inactivity expiry, and at most eight sessions per host. There is one controlling session at a time; view-only sessions may coexist. Capture and input use separate serialized gates. Revocation and ownership are checked again after queued waits; frames and clipboard reads are checked after capture/read before returning data. Every held key/button has a ten-second lease renewed only by another down event for that key/button. Frames and mouse movement cannot extend a lost key-up lease. A safety worker checks every two seconds and releases expired inputs. Long intentional holds need repeated down events. The host stops if the safety worker fails.
+Input batches (protocol 0.1, additive): hosts that report `platform.canInputBatch:true` in `/api/info` also accept `{"events":[<input object>, ...]}` with 1-64 input objects on the same route and the same 16 KiB body limit. The session, Control grant and resume epoch are checked once before the gate and again before every event; events are applied strictly in order under the one input gate, each recording its own held-input lease. The first failing event stops the batch: earlier events stay applied, later events are not applied, the host releases all held input, and the response is the error that event would have returned as a single object (for example `400 {error}` for an invalid event, `404` when authority ended part-way). An empty, oversized or malformed batch is `400` before any event runs. Viewers keep at most one input request in flight and send the events queued meanwhile as the next request (a single object when only one event is queued), in their original order, with consecutive pointer moves coalesced to the latest one. Hosts without the flag receive only single input objects. A batch holds the input gate while its events apply, so on backends with slow native input (for example the Linux X11 helpers) a full batch can delay a concurrent `release-inputs` by up to 64 event times; the host request rate limit counts requests, not events, so one controller can apply up to 64 times more events per second than with single objects. Cancellation (client abort, host stop) is checked before every event.
+
+Sessions have a two-hour absolute lifetime, 30-second inactivity expiry, at most two sessions per paired device and at most eight per host. Viewing sessions (every session without Control, including view-only sessions of a control-capable device) may hold at most seven of the eight slots: one stays free for a control session, so paired viewers cannot lock out the controller. A session over any limit returns `409`. There is one controlling session at a time; view-only sessions may coexist. Capture and input use separate serialized gates. Revocation and ownership are checked again after queued waits; frames and clipboard reads are checked after capture/read before returning data. Every held key/button has a ten-second lease renewed only by another down event for that key/button. Frames and mouse movement cannot extend a lost key-up lease. A safety worker checks every two seconds and releases expired inputs. Long intentional holds need repeated down events. The host stops if the safety worker fails.
 
 Each paired device has a persisted opaque resume epoch, returned by session creation and held by the viewer main process. Owner End/Block persists `blockedByOwner:true` and rotates that device's epoch. Disconnect all rotates every non-revoked pairing's epoch, blocking only devices with live sessions; idle pairings remain allowed to request an explicit new connection. The blocked device receives `403 {code:"ended_by_owner",error:"The owner ended this session. Ask them to allow you again."}` from both explicit and automatic session creation, including after host restart. Re-pairing the same certificate without revocation does not clear this decision. Only the authenticated local owner can Allow again; that action clears the block, rotates the epoch and retains the existing grants. It does not create a session or restore prior sessions. Revocation clears the block but removes certificate authorization, so revoked devices cannot be allowed again through this route. A fresh owner-approved pairing after revocation or identity rotation starts unblocked.
 
@@ -252,20 +388,22 @@ Normal lifecycle shutdown, crash recovery, remote DELETE of an owned session, an
 
 Lock returns `204` when the platform operation completes. Restart uses only a fixed native executable and fixed arguments, without a shell: Windows `shutdown.exe /r /t 15 /d p:4:1`, Linux `systemctl reboot --no-ask-password`, macOS `/sbin/shutdown -r +1`. No permission escalation is attempted. `202 {state:"requested",message}` means the OS command exited successfully, not that reboot or reconnection was verified. Linux may reboot immediately. Restart capability has not been exercised by the test suite.
 
-Usual failures: `400` invalid input, `401` unknown/missing identity, `403` forbidden/invalid pairing, `404` unavailable route/session/grant, `409` unavailable native capability/conflicting controller/settings, `410` host-ended automatic resume, `429` rate limit. Errors are `{error}` and capability/terminal errors add `code`. Authorization failures may have an empty body. Responses use `Cache-Control: no-store`.
+**Clipboard limits.** The `clipboard` grant covers both reading and writing; the host does not require Control or an active stream for either. Clipboard reads and writes share one token bucket per paired device, across all its sessions, so ending and creating sessions does not reset it: a burst of 5 operations, refilled at 2 per second. An authorized request beyond it returns `429 {code:"clipboard_rate_limited",error}` with `Retry-After: 1`, before the native clipboard is touched; denied requests still return `404` first. Successful reads and writes are audited as `clipboard.read` or `clipboard.write` with the device ID and the text's UTF-8 byte count, never the text, at most once per kind per device per minute (see `GET /api/audit`).
+
+Usual failures: `400` invalid input, `401` unknown/missing identity, `403` forbidden/invalid pairing, `404` unavailable route/session/grant, `409` unavailable native capability/conflicting controller/settings, `410` host-ended automatic resume, `429` rate limit. Errors are `{error}` and capability/terminal errors add `code`. `error` is fixed host text: native error messages, tool stderr and runtime exception text are never returned to a peer; the host logs that detail locally and sends a fixed message with the same status and `code`. Authorization failures may have an empty body. Responses use `Cache-Control: no-store`.
 
 ## Video stream (decision D11: wire contract frozen for implementation)
 
-Goal: maximum frame rate. The host captures with DXGI, encodes hardware H.264 (Media Foundation; measured 3.3â€“4.6 ms per 1080p frame on the NVIDIA MFT) and sends one continuous stream. The viewer decodes it with WebCodecs (measured 0.5â€“0.7 ms hardware decode). Per-frame PNG/JPEG stays the fallback for hosts without the capability. Reviewed by codex-host-1 (Kestrel feasibility) and codex-1 (viewer parser).
+Goal: maximum frame rate. The host captures with DXGI, encodes hardware H.264 (Media Foundation; measured 3.3–4.6 ms per 1080p frame on the NVIDIA MFT) and sends one continuous stream. The viewer decodes it with WebCodecs (measured 0.5–0.7 ms hardware decode). Per-frame PNG/JPEG stays the fallback for hosts without the capability. Reviewed by codex-host-1 (Kestrel feasibility) and codex-1 (viewer parser).
 
 **Why chunked HTTP instead of WebSocket.** The stream is one long `GET` on the existing remote listener, so it reuses the pinned mutual-TLS connection, Kestrel's client-certificate check, and the viewer's `PinnedAgent` pin verification unchanged. The viewer needs no new TLS client or third-party WebSocket library. Upstream control is a separate small `POST` on the pooled keep-alive connection (W5).
 
 | Method and path | Behavior |
 | --- | --- |
 | `GET /api/sessions/{id}/stream?monitorId=&codec=&maxFps=&bitrate=&scale=&cursor=video|local` | Requires viewing. `200`, `Content-Type: application/vnd.orbit.stream`, chunked body of records (below). `409 {code:"stream_unavailable"}` when the platform cannot encode; the viewer then uses `/frame`. At most one stream per session and monitor: a new stream ends the older one with terminal `stream_replaced`. At most 4 streams per authenticated paired device and 8 per host, including pending native opens and disposal (`429 {code:"stream_capacity"}` beyond; retry later, not a security denial). Capacity is reserved before capture/encoder allocation. Same-session/monitor replacement retains its position, ends the old stream, and waits at most 500 ms for endpoint/native disposal before opening the successor. A stalled cleanup returns the same typed429 without allocating; only one successor may wait. If the successor fails after the old stream ended, no stream remains until a later open succeeds. |
-| `POST /api/sessions/{id}/stream/control` | Requires viewing. Any of `{keyframe:true}`, `{ack:sequence, decodeMs}`, `{bitrateBps, maxFps, scale}` (clamped by the host). `204`. At most 60 requests/s per stream (`429`). Keyframe on join and decoder error (viewer: â‰¤ 2/s); acks are **cumulative** (the highest access-unit sequence fully received and handed to the decoder), sent about every 33 ms while frames arrive (â‰¤ 30 Hz); settings from the adaptive controller (W4). A keyframe request also clears the in-flight window, because the viewer discards pending deltas. |
+| `POST /api/sessions/{id}/stream/control` | Requires viewing. Any of `{keyframe:true}`, `{ack:sequence, decodeMs}`, `{bitrateBps, maxFps, scale}` (clamped by the host). `204`. At most 60 requests/s per stream (`429`). Keyframe on join and decoder error (viewer: ≤ 2/s); acks are **cumulative** (the highest access-unit sequence fully received and handed to the decoder), sent about every 33 ms while frames arrive (≤ 30 Hz); settings from the adaptive controller (W4). A keyframe request also clears the in-flight window, because the viewer discards pending deltas. |
 
-`POST /api/sessions` gains `canVideoStream:true` and `videoCodecs:["avc1.4D4028", â€¦]` (uppercase hex) when available.
+`POST /api/sessions` gains `canVideoStream:true` and `videoCodecs:["avc1.4D4028", …]` (uppercase hex) when available.
 
 **Record framing** (all integers little-endian, 24-byte header):
 
@@ -274,23 +412,23 @@ Goal: maximum frame rate. The host captures with DXGI, encodes hardware H.264 (M
 | `type` | u8 | 1 config, 2 video access unit, 3 heartbeat, 4 terminal, 5 cursor (only when negotiated, see below); anything else is a violation |
 | `flags` | u8 | bit 0 keyframe (type 2 only); other bits 0 |
 | reserved | u16 | 0 |
-| `length` | u32 | payload bytes; config â‰¤ 4 KiB, access unit â‰¤ 8 MiB, heartbeat 0, terminal â‰¤ 1 KiB |
+| `length` | u32 | payload bytes; config ≤ 4 KiB, access unit ≤ 8 MiB, heartbeat 0, terminal ≤ 1 KiB |
 | `sequence` | u32 | 0 for the first record of a stream, +1 per record, **never wraps** (the host ends the stream with terminal `stream_restart` first) |
 | `reserved2` | u32 | 0 |
-| `timestamp` | u64 | host **monotonic** clock in Âµs, non-decreasing per stream; wall-clock `capturedUtc` is separate metadata in config |
+| `timestamp` | u64 | host **monotonic** clock in µs, non-decreasing per stream; wall-clock `capturedUtc` is separate metadata in config |
 
-- **Config** (JSON â‰¤ 4 KiB), the first record and again on any resolution/codec change, always followed by a keyframe:
-  `codec` matching `^avc1\.[0-9A-F]{6}$`; `width/height` = encoded display size (decoder crop and aspect), 1..8192, `width Ã— height â‰¤ 33,554,432`;
-  `codedWidth/codedHeight` â‰¥ `width/height` and â‰¤ +16; `physicalLeft/physicalTop/physicalWidth/physicalHeight` (input mapping only, as `/frame` headers);
-  `scale` 0.33..1 with `|width âˆ’ round(physicalWidth Ã— scale)| â‰¤ 1` (same for height); `fps` 1..240; `monitorId` by the monitor-ID rules; `colorSpace` (BT.709 limited range by default; the viewer sets it explicitly).
-- **Access unit**: Annex-B H.264 with SPS/PPS on every keyframe, so a decoder configured without `description` can join at any keyframe. The first access unit after each config must be a keyframe.
-- **Cursor** (type 5, W7a; only after the viewer opened the stream with `cursor=local`, otherwise the cursor stays composited into the video): JSON â‰¤ 64 KiB `{x, y, visible, shapeId, shape?}` in **physical** desktop coordinates of the monitor (the same space as input). `shape` is sent only when `shapeId` is new: `{width â‰¤ 256, height â‰¤ 256, hotX, hotY, kind: "color"|"masked"|"mono", pngBase64, invertPngBase64?}`: `pngBase64` is the pre-rendered RGBA image of the pixels the pointer *replaces*; `invertPngBase64` (only for `mono`/`masked`) is white wherever the pointer *inverts* the screen under it (AND = 1, XOR = 1 in a monochrome pointer, or the masked-color XOR pixels). The viewer draws the invert layer first with the canvas `difference` blend (white inverts the pixels beneath it, as Windows does), then the replace layer normally. Masked-color XOR with non-white colors is approximated the same way. Pointer shapes only, never screen content. Sent on change, at most at the stream fps; `flags 0`; sequence/timestamp rules as for every record. The viewer draws the pointer locally at display refresh and hides its own system cursor over the remote surface; the host's pointer stays authoritative (the next record wins). A record outside the monitor bounds or with an unknown `shapeId` and no `shape` is a violation. Strict JSON: integer `x`/`y` (the global hotspot position), boolean `visible`, `shapeId` 1..128 printable characters (never empty; a hidden pointer uses a defined 1Ã—1 transparent shape such as `hidden-1`, sent with its `shape` on first use after each config), and optional `shape` with `width`/`height` 1..256, the hotspot inside it, and canonical base64 PNGs that decode to exactly that size; the whole JSON is â‰¤ 64 KiB. The host advertises `canLocalCursor` only when it emits these records, and the viewer sends `cursor=local` only then. When a stream falls back to composited video, the host first sends one hidden-pointer record (`visible:false` with the hidden shape id, defining that shape if it isn't known yet), and the viewer hides its pointer and drops any prediction at once. A config record or a new stream clears the shape cache. The viewer caches at most 64 shapes per config and evicts the least recently defined one; the host therefore omits `shape` only for ids among its last 64 definitions in the current config, and sends the definition again otherwise. Pointer generation/version deduplication stays on the host; the record sequence orders updates.
+- **Config** (JSON ≤ 4 KiB), the first record and again on any resolution/codec change, always followed by a keyframe:
+  `codec` matching `^avc1\.[0-9A-F]{6}$`; `width/height` = encoded display size (decoder crop and aspect), 1..8192, `width × height ≤ 33,554,432`;
+  `codedWidth/codedHeight` ≥ `width/height` and ≤ +16; `physicalLeft/physicalTop/physicalWidth/physicalHeight` (input mapping only, as `/frame` headers);
+  `scale` 0.33..1 with `|width − round(physicalWidth × scale)| ≤ 1` (same for height); `fps` 1..240; `monitorId` by the monitor-ID rules; `colorSpace` (BT.709 limited range by default; the viewer sets it explicitly).
+- **Access unit**: Annex-B H.264 with SPS/PPS on every keyframe, so a decoder configured without `description` can join at any keyframe. The first access unit after each config must be a keyframe. The viewer checks the keyframe flag against the NAL headers (at most 512 NAL units per access unit, `forbidden_zero_bit` 0): a keyframe must contain an IDR slice (type 5) and no non-IDR slice (type 1), a delta no IDR slice; anything else is a framing violation.
+- **Cursor** (type 5, W7a; only after the viewer opened the stream with `cursor=local`, otherwise the cursor stays composited into the video): JSON ≤ 64 KiB `{x, y, visible, shapeId, shape?}` in **physical** desktop coordinates of the monitor (the same space as input). `shape` is sent only when `shapeId` is new: `{width ≤ 256, height ≤ 256, hotX, hotY, kind: "color"|"masked"|"mono", pngBase64, invertPngBase64?}`: `pngBase64` is the pre-rendered RGBA image of the pixels the pointer *replaces*; `invertPngBase64` (only for `mono`/`masked`) is white wherever the pointer *inverts* the screen under it (AND = 1, XOR = 1 in a monochrome pointer, or the masked-color XOR pixels). The viewer draws the invert layer first with the canvas `difference` blend (white inverts the pixels beneath it, as Windows does), then the replace layer normally. Masked-color XOR with non-white colors is approximated the same way. Pointer shapes only, never screen content. Sent on change, at most at the stream fps; `flags 0`; sequence/timestamp rules as for every record. The viewer draws the pointer locally at display refresh and hides its own system cursor over the remote surface; the host's pointer stays authoritative (the next record wins). A record outside the monitor bounds or with an unknown `shapeId` and no `shape` is a violation. Strict JSON: integer `x`/`y` (the global hotspot position), boolean `visible`, `shapeId` 1..128 printable characters (never empty; a hidden pointer uses a defined 1×1 transparent shape such as `hidden-1`, sent with its `shape` on first use after each config), and optional `shape` with `width`/`height` 1..256, the hotspot inside it, and canonical base64 PNGs that decode to exactly that size; the whole JSON is ≤ 64 KiB. The host advertises `canLocalCursor` only when it emits these records, and the viewer sends `cursor=local` only then. When a stream falls back to composited video, the host first sends one hidden-pointer record (`visible:false` with the hidden shape id, defining that shape if it isn't known yet), and the viewer hides its pointer and drops any prediction at once. A config record or a new stream clears the shape cache. The viewer caches at most 64 shapes per config and evicts the least recently defined one; the host therefore omits `shape` only for ids among its last 64 definitions in the current config, and sends the definition again otherwise. Pointer generation/version deduplication stays on the host; the record sequence orders updates.
 - **Heartbeat**: `flags 0`, `length 0`, every 2 s while nothing changes (DXGI reported no new frame). Idle screens cost ~nothing, and a dead link is detected within 5 s.
-- **Terminal** (JSON `{code,error}`): the last record, sent before the host closes the stream for session end, `410` host-ended, revocation, permission change, identity rotation, host stop, `stream_replaced` or `stream_restart`. Delivery is best-effort with a bounded wait (â‰ˆ 250 ms), then the connection is aborted. `code` is exactly one of: `session_ended`, `session_ended_by_host` (410), `access_revoked` (401), `permission_changed`, `identity_rotated`, `host_stopping`, `stream_replaced`, `stream_restart`, `stream_error`, `display_asleep` (409); the viewer treats an unknown code as `stream_error`. Only `stream_restart`, `stream_error`, `host_stopping` and `display_asleep` may retry under their existing session authority. `display_asleep` keeps the image fallback and a minimum fifteen-second video retry delay; it never renews or restores authority. The other codes end the session. `error` is a human-readable string of at most 500 characters and is never parsed.
+- **Terminal** (JSON `{code,error}`): the last record, sent before the host closes the stream for session end, `410` host-ended, revocation, permission change, identity rotation, host stop, `stream_replaced` or `stream_restart`. Delivery is best-effort with a bounded wait (≈ 250 ms), then the connection is aborted. `code` is exactly one of: `session_ended`, `session_ended_by_host` (410), `access_revoked` (401), `permission_changed`, `identity_rotated`, `host_stopping`, `stream_replaced`, `stream_restart`, `stream_error`, `display_asleep` (409); the viewer treats an unknown code as `stream_error`. Only `stream_restart`, `stream_error`, `host_stopping` and `display_asleep` may retry under their existing session authority. `display_asleep` keeps the image fallback and a minimum fifteen-second video retry delay; it never renews or restores authority. The other codes end the session. `error` is a human-readable string of at most 500 characters and is never parsed.
 
-**Viewer error handling.** Framing violations (unknown type, nonzero reserved bits, out-of-bounds length or config, sequence gap/repeat/wrap, decreasing timestamp, bytes after terminal, video before config, non-keyframe after config) **tear down the transport**. They are never treated as a dropped delta. EOF without a terminal, including EOF inside a partial header or payload, is a transient failure: discard the partial record and reconnect with backoff under the resume rules (an ended host session still yields `410`). A decoder error on an otherwise valid stream, or a new frame arriving while 12 frames are already pending decode or while the oldest pending frame is older than 500 ms, resets the decoder, keeps the last frame on screen and requests a keyframe.
+**Viewer error handling.** Framing violations (unknown type, nonzero reserved bits, out-of-bounds length or config, sequence gap/repeat/wrap, decreasing timestamp, bytes after terminal, video before config, non-keyframe after config, keyframe flag that contradicts the NAL slice types) **tear down the transport**. They are never treated as a dropped delta. EOF without a terminal, including EOF inside a partial header or payload, is a transient failure: discard the partial record and reconnect with backoff under the resume rules (an ended host session still yields `410`). A decoder error on an otherwise valid stream, or a new frame arriving while 12 frames are already pending decode or while the oldest pending frame is older than 500 ms, resets the decoder, keeps the last frame on screen and requests a keyframe.
 
-**Backpressure and latency.** The host never queues frames: it bounds unacknowledged access units by **count and bytes**: at most 8 in flight, and at most `bitrateBps/8 Ã— 0.1 s` bytes (about 100 ms of the target rate; at least one access unit is always allowed), so a LAN reaches the full frame rate while a slow link never queues stale frames and while the socket write is pending or the limit is reached it **skips capture and encoding** (capture-rate adaptation), so latency stays bounded on a slow link and the frame rate drops instead. One shared per-monitor producer (DXGI loop) feeds both `/frame` and `/stream`; the global capture gate is never held for a stream's lifetime. Encoder settings: low-latency mode, no B-frames, long GOP with keyframes on request, bitrate from `stream/control`.
+**Backpressure and latency.** The host never queues frames: it bounds unacknowledged access units by **count and bytes**: at most 8 in flight, and at most `bitrateBps/8 × 0.1 s` bytes (about 100 ms of the target rate; at least one access unit is always allowed), so a LAN reaches the full frame rate while a slow link never queues stale frames and while the socket write is pending or the limit is reached it **skips capture and encoding** (capture-rate adaptation), so latency stays bounded on a slow link and the frame rate drops instead. One shared per-monitor producer (DXGI loop) feeds both `/frame` and `/stream`; the global capture gate is never held for a stream's lifetime. Encoder settings: low-latency mode, no B-frames, long GOP with keyframes on request, bitrate from `stream/control`.
 
 **Security requirements (same as `/frame`).** Revocation, ownership and the viewing grant are checked when the stream opens and **re-checked at least every second by a timer independent of writes and encoding**, which cancels the linked I/O. The host ends the stream within 1 s of revocation, session end or permission loss. The viewer validates every header before allocating or decoding, and never feeds unvalidated lengths to the decoder. Glass-to-glass latency across two computers needs clock-offset estimation; the HUD labels it an estimate (W7e).
 

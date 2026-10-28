@@ -2,11 +2,13 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { isDeepStrictEqual } = require('node:util');
 const { SessionVideoStreams, sessionAvailability, streamErrorPolicy } = require('./stream-session.cjs');
 const { SECURITY_TERMINAL, IDENTITY_TERMINAL, IDENTITY_CHANGED_MESSAGE } = require('./security-terminal.cjs');
 const { markDownloaded } = require('./mark-of-web.cjs');
 const { request, remoteRequest, parseInvite, validateAddress, normalizeFingerprint,
   transferDeadline, MAX_TRANSFER_BYTES, TRANSFER_IDLE_MS, isDisplayAsleep, DISPLAY_ASLEEP_MESSAGE } = require('./transport.cjs');
+const peerData = require('./peer-data.cjs');
 
 const MIN_FRAME_SCALE = 0.33; // Matches FrameQuality.MinimumScale on the host.
 const CLEANUP_RETRY_HTTP = new Set([408, 429, 500, 502, 503, 504]);
@@ -61,6 +63,7 @@ class OrbitController {
     this.onDisplayAsleep = options.onDisplayAsleep || (() => {});
     this.onDisplayPendingInvalidated = options.onDisplayPendingInvalidated || (() => {});
     this.requestRemote = options.remoteRequest || remoteRequest;
+    this.inputBatchLimit = options.inputBatchLimit || 64; // InputEndpoints.MaximumBatchEvents on the host.
     this.connections = [];
     this.sessions = new Map();
     this.identityFailures = new WeakMap();
@@ -81,10 +84,18 @@ class OrbitController {
     try {
       const data = JSON.parse(await fs.readFile(path.join(this.directory, 'connections.json'), 'utf8'));
       if (!Array.isArray(data) || data.length > 200) throw new Error('Invalid saved connections.');
-      this.connections = data.map(device => {
+      // A paired host's name, platform and grants were saved from untrusted replies:
+      // repair them, and drop entries without a usable ID. Address and pin fail closed.
+      this.connections = data.map(peerData.savedDevice).filter(Boolean).map(device => {
         validateAddress(device.address, this.allowLoopback);
-        return { ...device, fingerprint: normalizeFingerprint(device.fingerprint) };
+        const repaired = { ...device, fingerprint: normalizeFingerprint(device.fingerprint) };
+        if ('serverFingerprint' in repaired) {
+          try { repaired.serverFingerprint = normalizeFingerprint(repaired.serverFingerprint); } catch { delete repaired.serverFingerprint; }
+        }
+        return repaired;
       });
+      // Rewrite the file only when the repair changed something (key order alone is not a change).
+      if (!isDeepStrictEqual(this.connections, data)) await this.save().catch(() => {});
     } catch (error) { if (error.code !== 'ENOENT') throw new Error('Saved device configuration is invalid: ' + error.message); }
   }
   async local(route, method = 'GET', body) {
@@ -445,14 +456,42 @@ class OrbitController {
     }
     const item = { input, epoch: session.inputEpoch || 0, promise: null };
     session.pendingInputCount = (session.pendingInputCount || 0) + 1;
-    session.inputQueue = (session.inputQueue || Promise.resolve()).catch(() => {}).then(async () => {
-      if (session.pendingMove === item) session.pendingMove = null;
-      if (session.closed || (session.inputEpoch || 0) !== item.epoch || this.sessions.get(id) !== session) return;
-      await this.remote(session.device, '/api/sessions/' + encodeURIComponent(session.remoteId) + '/input', { method: 'POST', body: item.input });
-    }).finally(() => { session.pendingInputCount--; });
-    item.promise = session.inputQueue;
+    if (session.canInputBatch) {
+      item.promise = new Promise((resolve, reject) => { item.resolve = resolve; item.reject = reject; });
+      (session.inputPending ||= []).push(item);
+      this.scheduleInputBatch(id, session);
+    } else {
+      session.inputQueue = (session.inputQueue || Promise.resolve()).catch(() => {}).then(async () => {
+        if (session.pendingMove === item) session.pendingMove = null;
+        if (session.closed || (session.inputEpoch || 0) !== item.epoch || this.sessions.get(id) !== session) return;
+        await this.remote(session.device, '/api/sessions/' + encodeURIComponent(session.remoteId) + '/input', { method: 'POST', body: item.input });
+      }).finally(() => { session.pendingInputCount--; });
+      item.promise = session.inputQueue;
+    }
     session.pendingMove = input.kind === 'pointerMove' ? item : null;
     return item.promise;
+  }
+  // One request in flight; everything queued behind it leaves as one ordered batch when it returns.
+  scheduleInputBatch(id, session) {
+    if (session.inputBatchScheduled) return;
+    session.inputBatchScheduled = true;
+    session.inputQueue = (session.inputQueue || Promise.resolve()).catch(() => {}).then(() => this.sendInputBatch(id, session));
+  }
+  async sendInputBatch(id, session) {
+    session.inputBatchScheduled = false;
+    const items = session.inputPending.splice(0, this.inputBatchLimit);
+    if (items.includes(session.pendingMove)) session.pendingMove = null;
+    if (session.inputPending.length) this.scheduleInputBatch(id, session);
+    const current = !session.closed && this.sessions.get(id) === session;
+    const live = current ? items.filter(item => item.epoch === (session.inputEpoch || 0)) : [];
+    for (const item of items) if (!live.includes(item)) { session.pendingInputCount--; item.resolve(); }
+    if (!live.length) return;
+    let failure;
+    try {
+      await this.remote(session.device, '/api/sessions/' + encodeURIComponent(session.remoteId) + '/input',
+        { method: 'POST', body: live.length === 1 ? live[0].input : { events: live.map(item => item.input) } });
+    } catch (error) { failure = error; }
+    for (const item of live) { session.pendingInputCount--; if (failure) item.reject(failure); else item.resolve(); }
   }
   getDevice(id) {
     const device = this.connections.find(d => d.id === id);
@@ -495,6 +534,8 @@ class OrbitController {
         fingerprint: raw.certificateFingerprint,
         tailscale: {
           available: transport.mode === 'tailscale' || !!transport.executable, connected: transport.mode === 'tailscale' || transport.mode === 'loopback-test',
+          // Machine-readable host state; absent from older hosts, so the renderer keeps a text fallback.
+          ...(typeof transport.state === 'string' ? { state: transport.state } : {}),
           ip: transport.address || transport.ip || (raw.remoteAddress ? new URL(raw.remoteAddress).hostname : undefined),
           dnsName: transport.nodeName || transport.dnsName, error: transport.error || transport.message ||
             (transport.mode === 'loopback-test' ? 'Local integration test mode. Remote access is bound to loopback.' : undefined),
@@ -572,11 +613,12 @@ class OrbitController {
         const result = await this.remote({ address: invite.address, fingerprint: invite.fingerprint }, '/api/pair', {
           method: 'POST', body: { secret: invite.secret, deviceName: status.hostName },
         });
-        const info = result.json;
-        const device = { id: info.hostId, name: info.hostName || invite.hostName, platform: 'unknown',
+        const info = result.json || {};
+        const device = { id: peerData.deviceId(info.hostId),
+          name: peerData.displayText(info.hostName) || peerData.displayText(invite.hostName) || 'Remote device', platform: 'unknown',
           address: invite.address, fingerprint: invite.fingerprint, serverFingerprint: invite.fingerprint,
-          permissions: info.permissions, pairedAt: new Date().toISOString(), online: true };
-        if (typeof device.id !== 'string' || !device.id) throw new Error('Device returned an invalid identity.');
+          permissions: peerData.permissions(info.permissions), pairedAt: new Date().toISOString(), online: true };
+        if (!device.id) throw new Error('Device returned an invalid identity.');
         // The remote host chooses its own ID. A hostile invite could reuse a trusted device's ID
         // to replace that saved entry's address and certificate, so a different pin never overwrites.
         const existing = this.connections.find(d => d.id === device.id);
@@ -594,10 +636,12 @@ class OrbitController {
             const info = (await this.remote(device, '/api/info')).json;
             device.online = true;
             delete device.revoked; delete device.statusReason;
-            device.platform = info.platform?.operatingSystem || info.operatingSystem || device.platform;
-            device.name = info.hostName || device.name;
+            const operatingSystem = info.platform?.operatingSystem || info.operatingSystem;
+            if (operatingSystem) device.platform = peerData.platformName(operatingSystem);
+            device.name = peerData.displayText(info.hostName) || device.name;
             // The host reports this pairing's current grants; reflect host-side permission changes.
-            if (info.permissions && typeof info.permissions === 'object' && !Array.isArray(info.permissions)) device.permissions = info.permissions;
+            const granted = peerData.permissions(info.permissions);
+            if (granted) device.permissions = granted;
             device.lastSeen = new Date().toISOString();
           } catch (error) {
             device.online = false;
@@ -624,16 +668,17 @@ class OrbitController {
         current();
         const info = (await this.remote(device, '/api/info')).json;
         current();
-        const monitors = info.platform?.monitors || info.monitors || [];
+        const monitors = peerData.monitors(info?.platform?.monitors || info?.monitors);
         if (payload.monitorId && (typeof payload.monitorId !== 'string' || !monitors.some(m => m.id === payload.monitorId)))
           throw new Error('The selected remote monitor is no longer available. Choose a display and connect again.');
         let deleteCreated, createdPin = pin;
         const created = await this.remote(device, '/api/sessions', { method: 'POST', body: {
           monitorId: payload.monitorId || null, viewOnly: payload.viewOnly === true,
         } }, (cleanup, cleanupPin) => { deleteCreated = cleanup; createdPin = cleanupPin; });
-        const result = created.json;
+        const result = created.json || {};
         const remoteId = result.id || result.sessionId;
-        if (!remoteId) throw new Error('Device did not create a session.');
+        if (typeof remoteId !== 'string' || !remoteId || remoteId.length > 128) throw new Error('Device did not create a session.');
+        const granted = peerData.permissions(result.permissions);
         try { current(); } catch (error) {
           await this.cleanupCreated(device, remoteId, deleteCreated, IDENTITY_TERMINAL.has(error?.code), createdPin);
           throw error;
@@ -644,13 +689,13 @@ class OrbitController {
         this.sessions.set(localId, { device, remoteId, remotePin: createdPin, deleteRemote: deleteCreated, monitors, monitorId: payload.monitorId || null,
           canScaleFrames: info.platform?.canScaleFrames === true, canConditionalFrames: info.platform?.canConditionalFrames === true,
           canJpegFrames: info.platform?.canJpegFrames === true,
-          canLocalCursor: info.platform?.canLocalCursor === true,
+          canLocalCursor: info.platform?.canLocalCursor === true, canInputBatch: info.platform?.canInputBatch === true,
           resumeEpoch: typeof result.resumeEpoch === 'string' && result.resumeEpoch.length <= 128 ? result.resumeEpoch : null,
-          permissions: result.permissions || device.permissions, viewOnly: payload.viewOnly === true,
+          permissions: granted || device.permissions, viewOnly: payload.viewOnly === true,
           canWakeDisplay: result.canWakeDisplay === true,
           startedAt: new Date().toISOString(), frame: null, frameSlots: new Map(), renewPending: null, inputQueue: Promise.resolve(),
-          closed: false, sessionGeneration: 0, inputEpoch: 0, pendingInputCount: 0, pendingMove: null });
-        return { sessionId: localId, sessionGeneration: 0, deviceId: device.id, permissions: result.permissions || device.permissions, monitors, link: created.link,
+          closed: false, sessionGeneration: 0, inputEpoch: 0, pendingInputCount: 0, pendingMove: null, inputPending: [] });
+        return { sessionId: localId, sessionGeneration: 0, deviceId: device.id, permissions: granted || device.permissions, monitors, link: created.link,
           availability: this.availability(localId),
           canScaleFrames: info.platform?.canScaleFrames === true, canConditionalFrames: info.platform?.canConditionalFrames === true,
           canJpegFrames: info.platform?.canJpegFrames === true, canLocalCursor: info.platform?.canLocalCursor === true };
@@ -990,7 +1035,9 @@ class OrbitController {
         const result = await this.remote(s.device, '/api/sessions/' + encodeURIComponent(s.remoteId) + '/clipboard', {
           method: writing ? 'PUT' : 'GET', ...(writing ? { body: { text: String(payload.text || '') } } : {}),
         });
-        return result.json || { ok: true };
+        // Clipboard text is the remote user's content and keeps its characters; only its type is checked.
+        if (!writing) return { text: typeof result.json?.text === 'string' ? result.json.text : '' };
+        return { ok: true };
       }
       case 'session.lock':
       case 'session.restart': {
@@ -1002,7 +1049,9 @@ class OrbitController {
       case 'files.list': {
         const s = this.getSession(payload);
         const result = (await this.remote(s.device, '/api/sessions/' + encodeURIComponent(s.remoteId) + '/files')).json;
-        const entries = (Array.isArray(result) ? result : result.entries || []).map(f => ({ ...f, path: f.name, isDirectory: false }));
+        // Names with bidi, format or control characters are refused, so a listed
+        // "invoice<RLO>fdp.exe" is never shown or saved as "invoiceexe.pdf".
+        const entries = peerData.fileEntries(result).map(f => ({ ...f, path: f.name, isDirectory: false }));
         // Remember listed sizes so a download can scale its deadline and refuse oversize files up front.
         s.fileSizes = new Map(entries.filter(f => typeof f.name === 'string' && Number.isFinite(f.size)).map(f => [f.name, f.size]));
         return { entries, path: '/' };
@@ -1022,7 +1071,7 @@ class OrbitController {
       case 'files.download': {
         const s = this.getSession(payload);
         const name = payload.name;
-        if (typeof name !== 'string' || name !== path.basename(name) || /[\\/:\x00-\x1f]/.test(name)) throw new Error('Invalid file name.');
+        if (!peerData.isSafeFileName(name) || name !== path.basename(name)) throw new Error('Invalid file name.');
         const listedSize = s.fileSizes?.get(name);
         if (listedSize > MAX_TRANSFER_BYTES) throw new Error(tooLarge(name));
         const destination = await this.native.saveFile?.(name);
@@ -1059,7 +1108,8 @@ class OrbitController {
         if ('allowFiles' in payload) next.fileTransferEnabled = payload.allowFiles === true;
         if ('allowPower' in payload) next.allowRemotePower = payload.allowPower === true;
         if ('hostName' in payload) next.hostName = String(payload.hostName).slice(0, 80);
-        if ('fileTransferRoot' in payload) next.fileTransferRoot = payload.fileTransferRoot || null;
+        // The transfer folder is never taken from the renderer: only a folder chosen in the native
+        // dialog below is stored. A `fileTransferRoot` in the payload (the renderer echoes status) is ignored.
         if (next.fileTransferEnabled && !next.fileTransferRoot) {
           next.fileTransferRoot = await this.native.chooseFolder?.();
           if (!next.fileTransferRoot) throw new Error('Select a dedicated folder before enabling file transfer.');

@@ -227,3 +227,49 @@ internal sealed partial class GpuMonitorCapture
         Width = width, Height = height, MipLevels = 1, ArraySize = 1, Format = format, SampleCount = 1, Usage = 0 /* DEFAULT */, BindFlags = bind,
     };
 }
+
+/// <summary>
+/// A new encoder's view of one capture generation (<see cref="GpuMonitorCapture.Binding"/>). It holds its own reference on
+/// the device, immediate context and IMFDXGIDeviceManager (each zero when the capture is lost) until disposed, so a
+/// recovery or Dispose on the producer thread cannot free them while an encoder opens. Dispose releases once (manager,
+/// context, then device) and is idempotent; the pointers are unusable afterwards.
+/// </summary>
+internal sealed class GpuBinding : IDisposable
+{
+    private IntPtr device, context, manager;
+    private int disposed;
+
+    /// <summary>Takes one reference on each non-zero pointer; the caller holds the capture gate.</summary>
+    internal GpuBinding(string generation, IntPtr device, IntPtr context, IntPtr manager, int width, int height, long luid, uint vendor)
+    {
+        Generation = generation; Width = width; Height = height; Luid = luid; Vendor = vendor;
+        foreach (var pointer in new[] { device, context, manager }) if (pointer != IntPtr.Zero) Marshal.AddRef(pointer);
+        this.device = device; this.context = context; this.manager = manager;
+    }
+
+    public string Generation { get; }
+    public int Width { get; }
+    public int Height { get; }
+    public long Luid { get; }
+    public uint Vendor { get; }
+    public IntPtr Device => Live(device);
+    public IntPtr Context => Live(context);
+    public IntPtr Manager => Live(manager);
+
+    private IntPtr Live(IntPtr pointer)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+        return pointer;
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref disposed, 1) != 0) return;
+        Release(ref manager); Release(ref context); Release(ref device);
+    }
+
+    private static void Release(ref IntPtr pointer)
+    {
+        if (pointer != IntPtr.Zero) { Marshal.Release(pointer); pointer = IntPtr.Zero; }
+    }
+}

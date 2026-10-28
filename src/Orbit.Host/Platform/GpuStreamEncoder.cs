@@ -66,7 +66,9 @@ internal sealed class GpuStreamEncoder : IDisposable
     internal static GpuStreamEncoder? Create(GpuMonitorCapture capture, int width, int height, int fps, int bitrate, GpuColourPath colour,
         H264EncoderOptions? options, out string reason)
     {
-        var bind = capture.Binding();
+        // The binding holds device, context and manager until Initialize has its own references (QueryInterface, AddRef),
+        // so a concurrent recovery or Dispose cannot free them under the open.
+        using var bind = capture.Binding();
         if (bind.Generation.Length == 0) { reason = "capture-lost"; return null; }
         if (width <= 0 || height <= 0) { width = bind.Width & ~1; height = bind.Height & ~1; }
         if (width % 2 != 0 || height % 2 != 0 || width > bind.Width || height > bind.Height) { reason = "Output size must be even and at most the source size."; return null; }
@@ -81,6 +83,9 @@ internal sealed class GpuStreamEncoder : IDisposable
         {
             reason = $"interop-failed-0x{ex.HResult:X8}: {ex.Message}";
         }
+        catch { result.Dispose(); throw; } // any other failure must not keep its QueryInterface references (and the old device) alive
+        // A recovery that won the race leaves an encoder on the old device: hand back a reset now, not on its first encode.
+        if (reason.Length == 0 && !capture.IsCurrentGeneration(bind.Generation)) reason = "capture-reset";
         if (reason.Length == 0) return result;
         result.Dispose();
         return null;

@@ -45,7 +45,7 @@ test('real desktop host: onboarding, pairing, native frames, settings and revoca
     mark('window visibility configured');
     const errors: string[] = [];
     page.on('pageerror', error => errors.push(error.message));
-    await expect(page.getByRole('button', { name: 'Add a device', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Invite a computer', exact: true })).toBeVisible();
     await expect(page.getByText('Local test mode', { exact: true })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Meet your other computer.' })).toBeVisible();
     const invoke = async <T,>(action: string, payload?: unknown): Promise<T> => {
@@ -102,7 +102,7 @@ test('real desktop host: onboarding, pairing, native frames, settings and revoca
     await page.keyboard.press('ArrowRight');
     await expect(permissionsTab).toBeFocused();
     await expect(permissionsTab).toHaveAttribute('aria-selected', 'true');
-    await expect(about.getByRole('tabpanel')).toContainText('Only the access you grant.');
+    await expect(about.getByRole('tabpanel')).toContainText('Only the access you allow.');
     await page.keyboard.press('ArrowRight');
     await expect(recoveryTab).toBeFocused();
     await expect(about.getByRole('tabpanel')).toContainText('locked-screen access and pre-login recovery are unavailable');
@@ -166,8 +166,9 @@ test('real desktop host: onboarding, pairing, native frames, settings and revoca
     await page.getByRole('button', { name: 'Settings', exact: true }).click();
     await page.getByRole('button', { name: 'Use Daylight theme', exact: true }).click();
     await page.getByRole('button', { name: 'Overview', exact: true }).click();
-    await page.getByRole('button', { name: 'Add a device', exact: true }).click();
-    await expect(page.getByRole('switch', { name: 'Mouse & keyboard', exact: true })).toHaveAttribute('aria-checked', 'false');
+    await page.getByRole('button', { name: 'Invite a computer', exact: true }).click();
+    await expect(page.getByRole('radio', { name: 'See only', exact: true })).toBeChecked();
+    await expect(page.getByRole('radio', { name: 'See and control', exact: true })).not.toBeChecked();
     await page.getByRole('button', { name: 'Create invite', exact: true }).click();
     const invitation = await page.getByLabel('PAIRING INVITATION', { exact: true }).inputValue();
     expect(invitation.startsWith('orbit://pair/')).toBe(true);
@@ -175,6 +176,8 @@ test('real desktop host: onboarding, pairing, native frames, settings and revoca
     await page.getByRole('button', { name: 'Join with an invite', exact: true }).click();
     await page.getByLabel('PAIRING INVITATION', { exact: true }).fill(invitation);
     await page.getByRole('button', { name: 'Pair this computer' }).click();
+    await expect(page.getByRole('dialog').locator('.pair-success')).toBeVisible();
+    await page.getByRole('button', { name: 'Later', exact: true }).click();
     await expect(page.getByRole('dialog')).toHaveCount(0);
     const { devices } = await invoke<any>('devices');
     const outgoing = devices.find((d: any) => d.direction === 'outgoing');

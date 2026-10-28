@@ -15,10 +15,10 @@ MONO = "Consolas, SFMono-Regular, Menlo, monospace"
 
 THEMES = {
     "dark": dict(bg="#101616", card="#16211c", box="#1d2b23", line="#33463a", text="#eceee7", muted="#a3b398",
-                 mint="#b2e6c5", mint_bg="#1e3a2b", blue="#aecaff", blue_bg="#16233a", gold="#e3cd8f", gold_bg="#3a321b",
+                 mint="#2dd4bf", mint_bg="#0c463f", blue="#aecaff", blue_bg="#16233a", gold="#e3cd8f", gold_bg="#3a321b",
                  rose="#f2b0a6", rose_bg="#3a2321", ink="#101616"),
     "light": dict(bg="#ffffff", card="#f6f6f1", box="#ffffff", line="#d5ddcd", text="#1f2d23", muted="#4f6349",
-                  mint="#22603f", mint_bg="#dff0e4", blue="#2b5aa6", blue_bg="#e3ecfb", gold="#86651a", gold_bg="#f6ecd2",
+                  mint="#00756a", mint_bg="#ccf2eb", blue="#2b5aa6", blue_bg="#e3ecfb", gold="#86651a", gold_bg="#f6ecd2",
                   rose="#a2392b", rose_bg="#fbe8e4", ink="#ffffff"),
 }
 ACCENTS = ("muted", "mint", "blue", "gold", "rose")
@@ -308,7 +308,7 @@ def pairing_wide(p, ty):
     mid = (hx + cw + vx) / 2
     steps = []
     y1 = 188
-    els, h1 = step_box(hx, y1, cw, 1, "Add a device", "Pick its grants. View only is the default.", p, ty, "mint")
+    els, h1 = step_box(hx, y1, cw, 1, "Invite a computer", "Pick its grants. View only is the default.", p, ty, "mint")
     steps += els
     y2 = y1 + h1 + 16
     els, h2 = step_box(hx, y2, cw, 2, "Create an invitation",
@@ -317,13 +317,13 @@ def pairing_wide(p, ty):
     # Staircase: step 4 sits between 2 and 5 so both hand-offs are straight horizontal arrows.
     y5 = y2 + h2 + 16
     a5 = y5 + 28
-    _, h4 = step_box(vx, 0, cw, 4, "Paste and connect",
+    _, h4 = step_box(vx, 0, cw, 4, "Join with an invite",
                      "Connects and checks the host certificate against the fingerprint.", p, ty, "blue",
                      emphasis="The secret is sent only after they match.", strong=True)
     y4 = a5 + 18 - h4
     a3 = y4 + 28
     assert y2 + 24 <= a3 <= y2 + h2 - 16, "step 4 does not overlap step 2"
-    els, h4 = step_box(vx, y4, cw, 4, "Paste and connect",
+    els, h4 = step_box(vx, y4, cw, 4, "Join with an invite",
                        "Connects and checks the host certificate against the fingerprint.", p, ty, "blue",
                        emphasis="The secret is sent only after they match.", strong=True)
     steps += els
@@ -359,10 +359,10 @@ def pairing_narrow(p, ty):
     body += els
     y += 26 + 22
     flow = [
-        (1, "Add a device", "Pick its grants. View only is the default.", "mint", "Host", {}),
+        (1, "Invite a computer", "Pick its grants. View only is the default.", "mint", "Host", {}),
         (2, "Create an invitation", "Holds the host address, certificate fingerprint and a one-time secret.", "mint", "Host",
          dict(extra=expiry(p))),
-        (4, "Paste and connect", "Connects and checks the host certificate against the fingerprint.", "blue", "Viewer",
+        (4, "Join with an invite", "Connects and checks the host certificate against the fingerprint.", "blue", "Viewer",
          dict(emphasis="The secret is sent only after they match.", strong=True)),
         (5, "Verify and remember", "Checks the secret, then stores the viewer's certificate pin and its grants.", "mint", "Host", {}),
     ]
@@ -620,7 +620,8 @@ def lifecycle_wide(p, ty):
              arrow(ax + aw, 392, n1, 392, p, "mint"), *labels(g1, 413, [("reconnected", True), ("back to Live", False)], p),
              arrow(n1 + nw, 236, n2, 236, p, "blue"), t(g2, 224, "Take control", p["text"], 13, 600, "middle"),
              *labels(g2, 257, [("if the host", False), ("granted Control", False)], p),
-             arrow(n2, 352, n1 + nw, 352, p), *keycap(g2, 328, "Esc", p), *labels(g2, 374, [("back to Live", False)], p),
+             arrow(n2, 352, n1 + nw, 352, p), *labels(g2, 320, [("Release", True), ("control", True)], p),
+             *labels(g2, 374, [("back to Live", False)], p),
              arrow(cx0 + cw, 210, ex, 210, p), *labels(g3, 184, [("Disconnect,", True), ("Disconnect all", True)], p),
              *labels(g3, 229, [("or host stop", True)], p),
              arrow(cx0 + cw, 364, ex, 364, p, "rose"), *labels(g3, 352, [("owner revokes", True)], p),
@@ -652,7 +653,7 @@ def lifecycle_narrow(p, ty):
              arrow(476, top, 476, live_y, p, "mint"), *labels(488, top + 32, [("reconnected", True), ("back to Live", False)], p, "start"),
              arrow(300, live_y + live_h, 300, ctrl_y, p, "blue"), t(314, mid - 4, "Take control", p["text"], 13, 600),
              t(314, mid + 14, "if the host granted Control", p["muted"], 12.5),
-             arrow(240, ctrl_y, 240, live_y + live_h, p), *keycap(206, mid - 8, "Esc", p),
+             arrow(240, ctrl_y, 240, live_y + live_h, p), *labels(228, mid - 16, [("Release", True), ("control", True)], p, "end"),
              t(228, mid + 22, "back to Live", p["muted"], 12, anchor="end")]
     ye = bottom + 80
     body += [arrow(150, bottom, 150, ye, p), *labels(162, bottom + 22, [("Disconnect,", True), ("Disconnect all", True),
@@ -677,8 +678,8 @@ GRANTS = [
 ]
 RULES = [
     ("link", "Control also needs Take control on the viewer."),
-    ("power", "Power requires Control."),
-    ("folder", "Files: one shared folder, 16 MiB limit, no overwrite."),
+    ("power", "Power requires Control and the host's setting."),
+    ("folder", "Files: one shared folder, 32 MiB limit, no overwrite."),
     ("revoke", "The host owner can revoke access at any time."),
 ]
 
@@ -867,10 +868,10 @@ def processes_narrow(p, ty):
 
 FIGURES = {
     "pairing": (pairing_wide, pairing_narrow, "Pairing two Orbit Remote computers",
-                "Pairing happens once per direction. 1: on the host, Add a device and choose its grants; view only is the "
+                "Pairing happens once per direction. 1: on the host, choose Invite a computer and pick its grants; view only is the "
                 "default. 2: the host creates an invitation with its address, certificate fingerprint and a one-time "
                 "secret; it expires in 5 minutes and works once. 3: you send it privately to the viewer. 4: the viewer "
-                "pastes it, connects, and checks that the host certificate matches the fingerprint before sending the "
+                "chooses Join with an invite, pastes it, connects, and checks that the host certificate matches the fingerprint before sending the "
                 "secret. 5: the host verifies the secret and stores the viewer's certificate pin and grants. 6: both "
                 "screens show the same security code, compared once. If an invitation leaks and someone else pairs "
                 "first, the codes will not match."),
@@ -884,15 +885,15 @@ FIGURES = {
                "in practice, does not protect a compromised computer, no independent audit yet."),
     "lifecycle": (lifecycle_wide, lifecycle_narrow, "Orbit Remote session lifecycle",
                   "A paired device moves to Live viewing with Connect or View only. Take control, if the host granted "
-                  "Control, moves to Controlling; Esc returns to Live. A network drop from either state moves to "
+                  "Control, moves to Controlling; releasing control returns to Live. A network drop from either state moves to "
                   "Reconnecting, which keeps the last frame dimmed and retries with backoff, then returns to Live. "
                   "Disconnect, Disconnect all or a host stop ends the session with HTTP 410 and it is never resumed "
                   "automatically. If the owner revokes the device, the session ends with HTTP 401 and access is removed."),
     "permissions": (permissions_wide, permissions_narrow, "Orbit Remote device permissions",
                     "Five grants a host owner can give a paired device: View, the default for new invitations; Control "
                     "of mouse and keyboard; Clipboard; Files; and Power to lock or restart. Rules: Control also needs "
-                    "Take control on the viewer; Power requires Control; Files are limited to one shared folder, 16 MiB "
-                    "and no overwrite; the host owner can revoke access at any time."),
+                    "Take control on the viewer; Power requires Control and the host's setting; Files are limited to one shared "
+                    "folder, 32 MiB and no overwrite; the host owner can revoke access at any time."),
     "processes": (processes_wide, processes_narrow, "Orbit Remote processes on each computer",
                   "Each computer runs the same parts: the sandboxed Orbit window with no Node.js and no keys, connected "
                   "by allow-listed IPC to the Orbit main process, which is the TLS client, checks the pin and policy and "

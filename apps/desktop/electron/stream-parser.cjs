@@ -64,6 +64,26 @@ function cursorPng(value, width, height) {
   if (!finished || offset !== bytes.length) invalid('Invalid cursor PNG termination.');
 }
 
+// NAL units examined per access unit. The host sends one picture per record (a few parameter sets plus its slices).
+const MAX_NAL_UNITS = 512;
+const START_CODE = Buffer.from([0, 0, 1]);
+
+// The keyframe flag must match the bitstream: a keyframe holds an IDR slice (5) and no non-IDR slice (1); a delta holds
+// no IDR slice. Other NAL types (SPS 7, PPS 8, SEI 6, AUD 9, ...) may appear in either. Only NAL header bytes are read,
+// from a view over the received payload (no copy); emulation prevention keeps 00 00 01 out of NAL payloads.
+function checkAccessUnitSlices(payload, keyframe) {
+  const bytes = Buffer.from(payload.buffer, payload.byteOffset, payload.byteLength);
+  let idr = false, count = 0;
+  for (let at = bytes.indexOf(START_CODE); at !== -1 && at + 3 < bytes.length; at = bytes.indexOf(START_CODE, at + 3)) {
+    if (++count > MAX_NAL_UNITS) invalid('Stream access unit has too many NAL units.');
+    const header = bytes[at + 3], nalType = header & 0x1f;
+    if (header & 0x80) invalid('Stream access unit has a forbidden NAL header bit.');
+    if (nalType === 5) { if (!keyframe) invalid('Stream delta access unit carries an IDR slice.'); idr = true; }
+    else if (nalType === 1 && keyframe) invalid('Stream keyframe access unit carries a non-IDR slice.');
+  }
+  if (keyframe && !idr) invalid('Stream keyframe access unit has no IDR slice.');
+}
+
 // Shapes the viewer keeps per config. The host never relies on more than this many (docs/PROTOCOL.md, type 5).
 const MAX_CURSOR_SHAPES = 64;
 
@@ -154,6 +174,7 @@ class OrbitStreamParser {
       const annexB = payload.length >= 4 && payload[0] === 0 && payload[1] === 0
         && (payload[2] === 1 || (payload.length >= 5 && payload[2] === 0 && payload[3] === 1));
       if (!annexB) invalid('Stream access unit is not Annex-B H.264.');
+      checkAccessUnitSlices(payload, !!(flags & 1));
       delivered = { type: 'access-unit', data: payload.buffer, keyframe: !!(flags & 1), sequence, timestamp };
       this.needsKeyframe = false;
     } else if (type === 3) delivered = { type: 'heartbeat', sequence, timestamp };
@@ -189,4 +210,4 @@ class OrbitStreamParser {
   }
 }
 
-module.exports = { OrbitStreamParser, StreamProtocolError, parseConfig, parseCursor, HEADER_BYTES, MAX_ACCESS_UNIT, MAX_CURSOR_BYTES, COLOR_SPACE };
+module.exports = { OrbitStreamParser, StreamProtocolError, parseConfig, parseCursor, HEADER_BYTES, MAX_ACCESS_UNIT, MAX_CURSOR_BYTES, MAX_NAL_UNITS, COLOR_SPACE };

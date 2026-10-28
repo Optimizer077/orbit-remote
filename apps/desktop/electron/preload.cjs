@@ -1,7 +1,7 @@
 'use strict';
 const { contextBridge, ipcRenderer } = require('electron');
 const actions = new Set([
-  'status', 'devices', 'app.open-project', 'invite.create', 'pair', 'session.start', 'session.frame',
+  'status', 'devices', 'app.open-project', 'app.mac-permissions', 'invite.create', 'pair', 'session.start', 'session.frame',
   'session.input', 'session.release-inputs', 'session.end', 'session.monitors', 'session.lock', 'session.restart',
   'clipboard.read', 'clipboard.write', 'clipboard.local.write', 'files.list', 'files.upload', 'files.download',
   'device.revoke', 'device.forget', 'device.block', 'device.allow', 'audit', 'settings.update', 'network.refresh', 'host.disconnect-all',

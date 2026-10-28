@@ -2,7 +2,8 @@
 
 Requirements: python -m pip install Pillow PyMuPDF
 Run from any directory: python docs/assets/brand/generate_brand_sheet.py
-This script writes only brand-sheet.png. It never rebuilds application icons.
+This script writes only brand-sheet.png and logo-preview.png (a transparent raster of
+logo.svg). It never rebuilds application icons.
 """
 
 from io import BytesIO
@@ -14,6 +15,10 @@ import pymupdf
 BRAND = Path(__file__).resolve().parent
 ROOT = BRAND.parents[2]
 ICONS = ROOT / "apps/desktop/build/icons"
+
+# Graphite chrome tokens from apps/desktop/renderer/src/styles.css.
+CANVAS, LINE = "#070b14", "#2c364a"
+TEXT, SECONDARY, MUTED = "#f4f7fb", "#d2d9e5", "#aab4c6"
 
 
 def font(size, bold=False):
@@ -28,12 +33,12 @@ def font(size, bold=False):
     return ImageFont.load_default(size=size)
 
 
-canvas = Image.new("RGB", (1600, 1140), "#0b1113")
+canvas = Image.new("RGB", (1600, 1140), CANVAS)
 draw = ImageDraw.Draw(canvas)
 body, small, heading, sub = font(19), font(16), font(32, True), font(20, True)
 
 
-def text(x, y, value, fill="#c7d5bd", face=body):
+def text(x, y, value, fill=SECONDARY, face=body):
     draw.text((x, y), value, font=face, fill=fill)
 
 
@@ -49,25 +54,25 @@ def paste(image, xy):
     canvas.paste(image, xy, image)
 
 
-text(54, 36, "ORBIT REMOTE", "#eef2fb", heading)
-text(56, 86, "Original identity / native asset review", "#9aa98f")
+text(54, 36, "ORBIT REMOTE", TEXT, heading)
+text(56, 86, "Original identity / native asset review", MUTED)
 app = Image.open(ICONS / "icon.png").convert("RGBA")
 paste(app.resize((240, 240), Image.Resampling.LANCZOS), (58, 144))
 paste(vector_image("logo.svg", 650), (366, 151))
-text(371, 350, "Geometric vector wordmark. No embedded fonts or stock art.", "#9aa98f")
+text(371, 350, "Geometric vector wordmark. No embedded fonts or stock art.", MUTED)
 text(1130, 160, "NATIVE APPLICATION", face=sub)
 for y, label in [(203, "PNG / Windows ICO / macOS ICNS"), (239, "1024px master with alpha"),
-                 (275, "Fixed mint + deep navy app tile"), (311, "OS adapts the monochrome tray")]:
+                 (275, "Fixed teal + deep navy app tile"), (311, "OS adapts the monochrome tray")]:
     text(1130, y, label)
 
 themes = [
-    ("ORBIT", "logo.svg", "#101616", "#eceee7", "#b2e6c5"),
-    ("MIDNIGHT", "logo-midnight.svg", "#101521", "#eef2fb", "#aecaff"),
-    ("PAPER", "logo-light.svg", "#f4f3ee", "#243329", "#286647"),
+    ("DAYLIGHT", "logo-light.svg", "#ffffff", "#0b1d3a", "#008577"),
+    ("DAYLIGHT SIDEBAR", "logo.svg", "#0b1d3a", "#f4f7fb", "#2dd4bf"),
+    ("GRAPHITE", "logo.svg", "#0f1522", "#f4f7fb", "#2dd4bf"),
 ]
 for index, (name, logo, background, foreground, accent) in enumerate(themes):
     x = 54 + index * 506
-    draw.rounded_rectangle((x, 415, x + 480, 695), radius=18, fill=background, outline="#33433c")
+    draw.rounded_rectangle((x, 415, x + 480, 695), radius=18, fill=background, outline=LINE)
     text(x + 24, 433, name, foreground, sub)
     paste(vector_image(logo, 415), (x + 20, 477))
     for position, (color, label) in enumerate([(background, "Background"), (foreground, "Text"), (accent, "Accent")]):
@@ -76,24 +81,26 @@ for index, (name, logo, background, foreground, accent) in enumerate(themes):
         text(xx + 32, 625, label, foreground, small)
         text(xx, 662, color, foreground, small)
 
-text(56, 727, "ACTUAL ICO REPRESENTATIONS", "#eef2fb", sub)
+text(56, 727, "ACTUAL ICO REPRESENTATIONS", TEXT, sub)
 ico = Image.open(ICONS / "icon.ico")
 x = 69
 for size, step in [(128, 185), (64, 125), (48, 110), (32, 100), (24, 90), (16, 85)]:
     paste(ico.ico.getimage((size, size)).convert("RGBA"), (x, 792 + (128 - size) // 2))
     text(x, 939, f"{size}px", face=small)
     x += step
-text(935, 727, "NATIVE TRAY ASSETS", "#eef2fb", sub)
+text(935, 727, "NATIVE TRAY ASSETS", TEXT, sub)
 paste(Image.open(ICONS / "tray.png").convert("RGBA"), (960, 821))
 paste(Image.open(ICONS / "tray@2x.png").convert("RGBA"), (1056, 805))
 text(947, 895, "32px", face=small)
 text(1061, 895, "64px", face=small)
-draw.rounded_rectangle((1170, 789, 1282, 872), radius=12, fill="#f4f3ee")
+draw.rounded_rectangle((1170, 789, 1282, 872), radius=12, fill="#edf1f7")
 paste(Image.open(ICONS / "trayTemplate@2x.png").convert("RGBA"), (1194, 799))
 text(1160, 895, "macOS template", face=small)
-text(55, 1000, "Review: one recognisable orbital motif across native formats and all three theme palettes.", "#eef2fb")
-text(55, 1037, "Renderer and native assets share the canonical circle, ellipse, core, and satellite geometry.", "#9aa98f", small)
-text(55, 1070, "Security comes from identity, permissions, encryption, and release checks; the logo does not certify security.", "#9aa98f", small)
+text(55, 1000, "Review: one recognisable orbital motif across native formats, Daylight, its navy sidebar, and Graphite.", TEXT)
+text(55, 1037, "Renderer and native assets share the canonical circle, ellipse, core, and satellite geometry.", MUTED, small)
+text(55, 1070, "Security comes from identity, permissions, encryption, and release checks; the logo does not certify security.", MUTED, small)
 output = BRAND / "brand-sheet.png"
 canvas.save(output)
 print(f"Updated {output}")
+vector_image("logo.svg", 1100).save(BRAND / "logo-preview.png")
+print(f"Updated {BRAND / 'logo-preview.png'}")

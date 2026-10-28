@@ -5,21 +5,35 @@ using System.Text.Json;
 namespace Orbit.Host;
 
 public sealed record TailnetPeer(string Id, string HostName, string? DnsName, string? OperatingSystem, bool Online, string[] Addresses);
-public sealed record TailscaleNetwork(string Mode, string? Address, string? NodeName, string? Error, IReadOnlyList<TailnetPeer> Peers, string? Executable)
+// State is the stable machine-readable summary of discovery (Error is human text only):
+// "connected", "off" (CLI found, not running/signed in or no usable address), "not-found"
+// (no CLI in the checked paths), "unknown" (the status call failed), or "loopback-test".
+public sealed record TailscaleNetwork(string Mode, string? Address, string? NodeName, string? Error, IReadOnlyList<TailnetPeer> Peers, string? Executable, string State)
 {
     public static async Task<TailscaleNetwork> DiscoverAsync(bool loopbackTest, CancellationToken cancellationToken = default)
     {
-        if (loopbackTest) return new("loopback-test", "127.0.0.1", "Local integration test", null, [], null);
+        if (loopbackTest) return new("loopback-test", "127.0.0.1", "Local integration test", null, [], null, "loopback-test");
         var executable = FindExecutable();
-        if (executable is null) return new("offline", null, null, "Tailscale CLI was not found. Remote listening is disabled.", [], null);
+        if (executable is null) return NotFound();
+        try { return FromStatusJson(await RunAsync(executable, ["status", "--json"], cancellationToken), executable); }
+        catch (Exception ex) when (ex is IOException or InvalidOperationException or System.ComponentModel.Win32Exception or OperationCanceledException)
+        { return Unverified(executable); }
+    }
+
+    internal static TailscaleNetwork NotFound() => new("offline", null, null, "Tailscale CLI was not found. Remote listening is disabled.", [], null, "not-found");
+    internal static TailscaleNetwork Unverified(string executable) => new("offline", null, null, "Could not verify Tailscale status. Remote listening is disabled.", [], executable, "unknown");
+
+    /// <summary>Classifies `tailscale status --json` output. Malformed output is "unknown", never "off".</summary>
+    internal static TailscaleNetwork FromStatusJson(string json, string executable)
+    {
         try
         {
-            using var document = JsonDocument.Parse(await RunAsync(executable, ["status", "--json"], cancellationToken));
+            using var document = JsonDocument.Parse(json);
             var root = document.RootElement;
-            if (root.GetProperty("BackendState").GetString() != "Running") return new("offline", null, null, "Tailscale is not running or signed in. Remote listening is disabled.", [], executable);
+            if (root.GetProperty("BackendState").GetString() != "Running") return new("offline", null, null, "Tailscale is not running or signed in. Remote listening is disabled.", [], executable, "off");
             var self = root.GetProperty("Self");
             var ip = self.GetProperty("TailscaleIPs").EnumerateArray().Select(x => x.GetString()).FirstOrDefault(x => IPAddress.TryParse(x, out var parsed) && parsed.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork && Security.IsTailscaleAddress(parsed));
-            if (ip is null) return new("offline", null, null, "No valid Tailscale IPv4 address. Remote listening is disabled.", [], executable);
+            if (ip is null) return new("offline", null, null, "No valid Tailscale IPv4 address. Remote listening is disabled.", [], executable, "off");
             var peers = new List<TailnetPeer>();
             if (root.TryGetProperty("Peer", out var peerRoot) && peerRoot.ValueKind == JsonValueKind.Object)
                 foreach (var entry in peerRoot.EnumerateObject())
@@ -27,10 +41,10 @@ public sealed record TailscaleNetwork(string Mode, string? Address, string? Node
                     var peer = entry.Value;
                     peers.Add(new(entry.Name, String(peer, "HostName") ?? "Unknown device", String(peer, "DNSName"), String(peer, "OS"), peer.TryGetProperty("Online", out var online) && online.ValueKind == JsonValueKind.True, peer.TryGetProperty("TailscaleIPs", out var addresses) ? addresses.EnumerateArray().Select(x => x.GetString() ?? "").ToArray() : []));
                 }
-            return new("tailscale", ip, String(self, "DNSName") ?? String(self, "HostName"), null, peers, executable);
+            return new("tailscale", ip, String(self, "DNSName") ?? String(self, "HostName"), null, peers, executable, "connected");
         }
-        catch (Exception ex) when (ex is IOException or InvalidOperationException or JsonException or System.ComponentModel.Win32Exception or OperationCanceledException)
-        { return new("offline", null, null, "Could not verify Tailscale status. Remote listening is disabled.", [], executable); }
+        catch (Exception ex) when (ex is InvalidOperationException or JsonException or KeyNotFoundException)
+        { return Unverified(executable); }
     }
 
     public async Task<bool> VerifyRemoteAsync(IPAddress? remoteAddress, CancellationToken cancellationToken)
